@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import WebKit
 
@@ -59,3 +60,4 @@ final class TabManager {
         onStateChange?()
     }
 }
+#endif

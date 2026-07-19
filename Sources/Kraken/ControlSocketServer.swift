@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import Network
 
@@ -94,3 +95,4 @@ final class ControlSocketServer {
         }
     }
 }
+#endif

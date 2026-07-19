@@ -1,15 +1,6 @@
+#if os(macOS)
 import Foundation
 import WebKit
-
-struct DownloadEntry: Codable {
-    let id: String
-    let name: String
-    let size: Int64
-    let received: Int64
-    let progress: Double
-    let done: Bool
-    let failed: Bool
-}
 
 final class DownloadManager: NSObject, WKDownloadDelegate {
 
@@ -152,3 +143,4 @@ final class DownloadManager: NSObject, WKDownloadDelegate {
         }
     }
 }
+#endif

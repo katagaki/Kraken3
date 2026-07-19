@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import Network
 
@@ -117,3 +118,4 @@ final class HTTPServer {
         })
     }
 }
+#endif

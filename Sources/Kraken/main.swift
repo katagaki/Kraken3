@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 
 setlinebuf(stdout)
@@ -8,3 +9,6 @@ app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.activate(ignoringOtherApps: true)
 app.run()
+#else
+runHeadless()
+#endif

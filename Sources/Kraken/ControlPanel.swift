@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 
 final class ControlPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
@@ -167,3 +168,4 @@ final class ControlPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         return label
     }
 }
+#endif
