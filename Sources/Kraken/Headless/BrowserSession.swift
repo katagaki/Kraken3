@@ -29,6 +29,12 @@ final class BrowserSession {
     private var activeTabID: String?
     private var discoveryStarted = false
 
+    // Cross-origin iframes run in their own attached targets; map each frame
+    // session back to the page session that owns it so picker events can be
+    // matched to the active tab and answered in the right frame.
+    private var frameOwner: [String: String] = [:]
+    private var pickerSession: String?
+
     private var viewportWidth: Double = 1280
     private var viewportHeight: Double = 800
     private var devicePixelRatio: Double = 1
@@ -129,11 +135,7 @@ final class BrowserSession {
             guard let self, let sessionId = result["sessionId"] as? String else { return }
             tab.sessionId = sessionId
             self.cdp.send("Page.enable", sessionId: sessionId)
-            self.cdp.send("Runtime.enable", sessionId: sessionId)
-            self.cdp.send("Runtime.addBinding", ["name": "__krakenPicker"], sessionId: sessionId)
-            self.cdp.send("Page.addScriptToEvaluateOnNewDocument",
-                          ["source": InputScript.source], sessionId: sessionId)
-            self.cdp.send("Runtime.evaluate", ["expression": InputScript.source], sessionId: sessionId)
+            self.installPickerHooks(sessionId: sessionId)
             self.configureSession(tab, reload: false)
             if let destination = navigateTo, let url = Navigation.destinationURL(for: destination) {
                 self.cdp.send("Page.navigate", ["url": url.absoluteString], sessionId: sessionId)
@@ -144,6 +146,19 @@ final class BrowserSession {
             self.broadcastState()
         }
         broadcastState()
+    }
+
+    // Installs the picker script + binding into a target and auto-attaches its
+    // cross-origin subframes so the same hooks reach every frame.
+    private func installPickerHooks(sessionId: String) {
+        cdp.send("Runtime.enable", sessionId: sessionId)
+        cdp.send("Runtime.addBinding", ["name": "__krakenPicker"], sessionId: sessionId)
+        cdp.send("Page.addScriptToEvaluateOnNewDocument",
+                 ["source": InputScript.source], sessionId: sessionId)
+        cdp.send("Runtime.evaluate", ["expression": InputScript.source], sessionId: sessionId)
+        cdp.send("Target.setAutoAttach",
+                 ["autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true],
+                 sessionId: sessionId)
     }
 
     private func closeTab(id: String) {
@@ -260,12 +275,29 @@ final class BrowserSession {
                 self?.broadcastState()
             }
 
+        case "Target.attachedToTarget":
+            guard let childSession = params["sessionId"] as? String,
+                  let info = params["targetInfo"] as? [String: Any],
+                  (info["type"] as? String) == "iframe" else { return }
+            // The event arrives on the owning (parent) session; resolve it to
+            // the root page so picker events can be traced back to a tab.
+            let root = sessionId.flatMap { frameOwner[$0] } ?? sessionId
+            frameOwner[childSession] = root
+            cdp.send("Page.enable", sessionId: childSession)
+            installPickerHooks(sessionId: childSession)
+
+        case "Target.detachedFromTarget":
+            if let childSession = params["sessionId"] as? String {
+                frameOwner.removeValue(forKey: childSession)
+            }
+
         case "Runtime.bindingCalled":
-            guard sessionId == activeTab?.sessionId,
+            guard let sessionId, isActiveTabSession(sessionId),
                   (params["name"] as? String) == "__krakenPicker",
                   let payload = params["payload"] as? String,
                   let data = payload.data(using: .utf8),
                   var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+            pickerSession = sessionId
             object["type"] = "picker"
             onPicker?(object)
 
@@ -350,7 +382,13 @@ final class BrowserSession {
         case "pickresult":
             var payload = message
             payload.removeValue(forKey: "type")
-            callHelper("setPicker", [payload])
+            // Apply the choice in the frame that opened the picker, which may be
+            // a cross-origin iframe rather than the tab's main frame.
+            let target = pickerSession ?? activeTab?.sessionId
+            pickerSession = nil
+            if let target {
+                callHelper("setPicker", [payload], sessionId: target)
+            }
         case "viewport":
             if let width = doubleValue(message["width"]), let height = doubleValue(message["height"]) {
                 applyViewport(width: width, height: height,
@@ -466,9 +504,23 @@ final class BrowserSession {
     }
 
     private func callHelper(_ function: String, _ arguments: [Any]) {
+        guard let sessionId = activeTab?.sessionId else { return }
+        callHelper(function, arguments, sessionId: sessionId)
+    }
+
+    private func callHelper(_ function: String, _ arguments: [Any], sessionId: String) {
         guard let argsData = try? JSONSerialization.data(withJSONObject: arguments),
               let args = String(data: argsData, encoding: .utf8) else { return }
-        evaluate("window.__kraken && window.__kraken.\(function).apply(null, \(args));")
+        cdp.send("Runtime.evaluate",
+                 ["expression": "window.__kraken && window.__kraken.\(function).apply(null, \(args));"],
+                 sessionId: sessionId)
+    }
+
+    // A binding call belongs to the active tab when it comes from the tab's own
+    // session or from one of its attached iframe sessions.
+    private func isActiveTabSession(_ session: String) -> Bool {
+        guard let active = activeTab?.sessionId else { return false }
+        return session == active || frameOwner[session] == active
     }
 
     private func doubleValue(_ value: Any?) -> Double? {
