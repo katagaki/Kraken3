@@ -29,11 +29,16 @@ final class BrowserSession {
     var onDownloads: (([String: Any]) -> Void)?
     var onFrame: ((Data) -> Void)?
     var onPicker: (([String: Any]) -> Void)?
+    var onCopyText: (([String: Any]) -> Void)?
+    var onTabsPersist: (([String], Int) -> Void)?
     var onProcessExit: (() -> Void)?
 
     private var tabs: [HeadlessTab] = []
     private var activeTabID: String?
     private var discoveryStarted = false
+    private let restoreTabs: [String]
+    private let restoreActiveIndex: Int
+    private var lastTabsKey = ""
 
     private var frameOwner: [String: String] = [:]
     private var pickerSession: String?
@@ -42,21 +47,26 @@ final class BrowserSession {
     private var viewportHeight: Double = 800
     private var devicePixelRatio: Double = 1
     private var colorScheme = "light"
-    private var lastFrame: Data?
+    private let streamer = FrameStreamer()
 
-    private static let desktopUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    private static let mobileUserAgent = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+    private static let desktopUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+    private static let mobileUserAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36"
 
     private var isMobileViewport: Bool { min(viewportWidth, viewportHeight) <= 700 }
     private var currentUserAgent: String { isMobileViewport ? Self.mobileUserAgent : Self.desktopUserAgent }
-    private var snapshotScale: Double { min(max(devicePixelRatio, 1), 2) }
+    // Integer scale keeps screencast and captureScreenshot dimensions identical,
+    // which partial-frame compositing on the client relies on.
+    private var snapshotScale: Double { min(max(devicePixelRatio.rounded(), 1), 2) }
     private var activeTab: HeadlessTab? { tabs.first { $0.targetId == activeTabID } }
 
     var processID: pid_t { cdp.processID }
 
     init(chromiumPath: String, homepage: String, profileDir: URL, downloadsDir: URL,
-         acceptLanguage rawAcceptLanguage: String?) throws {
+         acceptLanguage rawAcceptLanguage: String?,
+         restoreTabs: [String] = [], restoreActiveIndex: Int = 0) throws {
         self.homepage = homepage
+        self.restoreTabs = restoreTabs
+        self.restoreActiveIndex = restoreActiveIndex
         let trimmed = rawAcceptLanguage?.trimmingCharacters(in: .whitespaces)
         let value = (trimmed?.isEmpty == false) ? trimmed! : "en-US,en"
         self.acceptLanguage = value
@@ -88,6 +98,13 @@ final class BrowserSession {
 
         downloads.onChange = { [weak self] in self?.broadcastDownloads() }
 
+        streamer.onSend = { [weak self] data in self?.onFrame?(data) }
+        streamer.onScreencastConfigChange = { [weak self] in
+            guard let self, let tab = self.activeTab, let sessionId = tab.sessionId else { return }
+            self.cdp.send("Page.stopScreencast", sessionId: sessionId)
+            self.startScreencast(tab)
+        }
+
         cdp.send("Browser.setDownloadBehavior", [
             "behavior": "allowAndName",
             "downloadPath": downloadsDir.path,
@@ -96,21 +113,36 @@ final class BrowserSession {
         cdp.send("Target.getTargets") { [weak self] result in
             guard let self else { return }
             let infos = result["targetInfos"] as? [[String: Any]] ?? []
-            if let page = infos.first(where: { ($0["type"] as? String) == "page" }),
-               let targetId = page["targetId"] as? String {
-                self.adoptTarget(targetId, activate: true, navigateTo: self.homepage)
-            } else {
+            let initialPage = infos.first { ($0["type"] as? String) == "page" }
+                .flatMap { $0["targetId"] as? String }
+
+            // The active tab is restored last so it ends up on top after discovery adoption.
+            var restoreList = self.restoreTabs.filter { !$0.isEmpty && $0 != "about:blank" }
+            if self.restoreTabs.indices.contains(self.restoreActiveIndex) {
+                let activeURL = self.restoreTabs[self.restoreActiveIndex]
+                if let index = restoreList.firstIndex(of: activeURL) {
+                    restoreList.append(restoreList.remove(at: index))
+                }
+            }
+
+            if let targetId = initialPage {
+                self.adoptTarget(targetId, activate: true,
+                                 navigateTo: restoreList.first ?? self.homepage)
+            } else if restoreList.isEmpty {
                 self.newTab()
             }
             self.cdp.send("Target.setDiscoverTargets", ["discover": true])
             self.discoveryStarted = true
+            for url in restoreList.dropFirst(initialPage == nil ? 0 : 1) {
+                self.cdp.send("Target.createTarget", ["url": url])
+            }
         }
     }
 
     func syncNewClient() {
         broadcastState()
         broadcastDownloads()
-        if let frame = lastFrame { onFrame?(frame) }
+        streamer.syncClient()
     }
 
     func shutdown() {
@@ -132,7 +164,7 @@ final class BrowserSession {
         tabs.append(tab)
         if activate || activeTabID == nil {
             activeTabID = tab.targetId
-            lastFrame = nil
+            streamer.reset()
         }
         cdp.send("Target.attachToTarget", ["targetId": targetId, "flatten": true]) { [weak self] result in
             guard let self, let sessionId = result["sessionId"] as? String else { return }
@@ -181,7 +213,7 @@ final class BrowserSession {
             cdp.send("Page.stopScreencast", sessionId: oldSession)
         }
         activeTabID = id
-        lastFrame = nil
+        streamer.reset()
         cdp.send("Target.activateTarget", ["targetId": id])
         startScreencast(tab)
         broadcastState()
@@ -213,8 +245,8 @@ final class BrowserSession {
     private func startScreencast(_ tab: HeadlessTab) {
         guard let sessionId = tab.sessionId else { return }
         cdp.send("Page.startScreencast", [
-            "format": "jpeg",
-            "quality": 60,
+            "format": streamer.screencastFormat,
+            "quality": streamer.screencastQuality,
             "maxWidth": Int(viewportWidth * snapshotScale),
             "maxHeight": Int(viewportHeight * snapshotScale),
             "everyNthFrame": 1
@@ -245,7 +277,7 @@ final class BrowserSession {
             tabs.remove(at: index)
             if activeTabID == targetId {
                 activeTabID = tabs.indices.contains(index) ? tabs[index].targetId : tabs.last?.targetId
-                lastFrame = nil
+                streamer.reset()
                 if let tab = activeTab { startScreencast(tab) }
             }
             if tabs.isEmpty {
@@ -262,10 +294,8 @@ final class BrowserSession {
             guard let tab = activeTab, sessionId == tab.sessionId,
                   !tab.hideFrames,
                   let base64 = params["data"] as? String,
-                  let jpeg = Data(base64Encoded: base64),
-                  jpeg != lastFrame else { return }
-            lastFrame = jpeg
-            onFrame?(jpeg)
+                  let frame = Data(base64Encoded: base64) else { return }
+            streamer.ingest(frame)
 
         case "Page.frameStartedLoading":
             guard let tab = tabs.first(where: { $0.sessionId == sessionId }) else { return }
@@ -404,6 +434,14 @@ final class BrowserSession {
             state["navError"] = navError
         }
         onState?(state)
+
+        let urls = tabs.map(\.url)
+        let activeIndex = tabs.firstIndex { $0.targetId == activeTabID } ?? 0
+        let key = urls.joined(separator: "|") + "#\(activeIndex)"
+        if key != lastTabsKey {
+            lastTabsKey = key
+            onTabsPersist?(urls, activeIndex)
+        }
     }
 
     private func broadcastDownloads() {
@@ -416,6 +454,10 @@ final class BrowserSession {
 
     func handleControlMessage(_ message: [String: Any]) {
         switch message["type"] as? String {
+        case "frameack":
+            if let seq = doubleValue(message["seq"]) {
+                streamer.ack(Int(seq))
+            }
         case "tap":
             if let x = doubleValue(message["x"]), let y = doubleValue(message["y"]) {
                 injectTap(normalizedX: x, normalizedY: y)
@@ -446,6 +488,17 @@ final class BrowserSession {
         case "text":
             if let value = message["value"] as? String, let sessionId = activeTab?.sessionId {
                 cdp.send("Input.insertText", ["text": value], sessionId: sessionId)
+            }
+        case "copytext":
+            if let x = doubleValue(message["x"]), let y = doubleValue(message["y"]),
+               let sessionId = activeTab?.sessionId {
+                cdp.send("Runtime.evaluate", [
+                    "expression": "window.__kraken ? window.__kraken.textAt(\(x), \(y)) : ''",
+                    "returnByValue": true
+                ], sessionId: sessionId) { [weak self] result in
+                    let value = ((result["result"] as? [String: Any])?["value"] as? String) ?? ""
+                    self?.onCopyText?(["type": "copytext", "text": value])
+                }
             }
         case "pickresult":
             var payload = message
@@ -576,7 +629,11 @@ final class BrowserSession {
         for tab in tabs {
             configureSession(tab, reload: userAgentChanged)
         }
-        lastFrame = nil
+        streamer.setExpectedDims([
+            (Int(viewportWidth), Int(viewportHeight)),
+            (Int(viewportWidth * snapshotScale), Int(viewportHeight * snapshotScale))
+        ])
+        streamer.reset()
         if let tab = activeTab, let sessionId = tab.sessionId {
             cdp.send("Page.stopScreencast", sessionId: sessionId)
             startScreencast(tab)

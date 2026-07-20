@@ -232,6 +232,19 @@ enum InputScript {
           } else {
             window.scrollBy(dx, dy);
           }
+        },
+
+        textAt: function (nx, ny) {
+          var sel = window.getSelection ? String(window.getSelection()) : '';
+          if (sel && sel.trim()) return sel.slice(0, 20000);
+          var x = nx * window.innerWidth, y = ny * window.innerHeight;
+          var el = document.elementFromPoint(x, y);
+          if (!el) return '';
+          if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') return (el.value || '').slice(0, 20000);
+          var block = el.closest && el.closest(
+            'p,li,h1,h2,h3,h4,h5,h6,td,th,blockquote,pre,figcaption,dt,dd,label,summary,a,button');
+          var text = block ? block.innerText : (el.innerText || el.textContent || '');
+          return (text || '').trim().slice(0, 20000);
         }
       };
     })();

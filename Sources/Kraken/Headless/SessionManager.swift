@@ -21,14 +21,19 @@ final class SessionRecord {
     let browser: BrowserSession
     let dir: URL
     let pid: pid_t
+    let acceptLanguage: String?
     var lastActive: Date
     var lastMetaWrite: Date
+    var tabs: [String] = []
+    var activeTabIndex = 0
 
-    init(id: String, browser: BrowserSession, dir: URL, pid: pid_t, now: Date) {
+    init(id: String, browser: BrowserSession, dir: URL, pid: pid_t,
+         acceptLanguage: String?, now: Date) {
         self.id = id
         self.browser = browser
         self.dir = dir
         self.pid = pid
+        self.acceptLanguage = acceptLanguage
         self.lastActive = now
         self.lastMetaWrite = .distantPast
     }
@@ -54,6 +59,7 @@ final class SessionManager {
     var sendState: (String, [String: Any]) -> Void = { _, _ in }
     var sendDownloads: (String, [String: Any]) -> Void = { _, _ in }
     var sendPicker: (String, [String: Any]) -> Void = { _, _ in }
+    var sendCopyText: (String, [String: Any]) -> Void = { _, _ in }
     var sendFrame: (String, Data) -> Void = { _, _ in }
     var closeClients: (String) -> Void = { _ in }
     var connectedSessions: () -> Set<String> = { [] }
@@ -75,23 +81,28 @@ final class SessionManager {
     }
 
     func authenticate(_ cookies: [String: String]) -> Auth? {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         let now = Date()
         pruneExpired(now)
 
+        var auth: Auth?
         if let token = cookies["SessionToken"], let rec = accessTokens[token],
            rec.expires > now, let session = sessions[rec.sid] {
             let (access, refresh) = rotate(sid: rec.sid, oldAccess: token,
                                            oldRefresh: cookies["RefreshToken"], now: now)
-            return Auth(record: session, access: access, refresh: refresh)
-        }
-        if let token = cookies["RefreshToken"], let rec = refreshTokens[token],
-           rec.expires > now, let session = sessions[rec.sid] {
+            auth = Auth(record: session, access: access, refresh: refresh)
+        } else if let token = cookies["RefreshToken"], let rec = refreshTokens[token],
+                  rec.expires > now, let session = sessions[rec.sid] {
             let (access, refresh) = rotate(sid: rec.sid, oldAccess: cookies["SessionToken"],
                                            oldRefresh: token, now: now)
-            return Auth(record: session, access: access, refresh: refresh)
+            auth = Auth(record: session, access: access, refresh: refresh)
         }
-        return nil
+        lock.unlock()
+
+        if let auth {
+            writeTokens(auth.record, access: auth.access, refresh: auth.refresh, now: now)
+        }
+        return auth
     }
 
     func validateForWebSocket(_ cookies: [String: String]) -> String? {
@@ -147,7 +158,8 @@ final class SessionManager {
 
             let now = Date()
             let record = SessionRecord(id: id, browser: browser, dir: dir,
-                                       pid: browser.processID, now: now)
+                                       pid: browser.processID,
+                                       acceptLanguage: acceptLanguage, now: now)
             wire(record)
 
             lock.lock()
@@ -158,19 +170,114 @@ final class SessionManager {
             lock.unlock()
 
             writeMeta(record, now: now)
+            writeTokens(record, access: access, refresh: refresh, now: now)
             return .created(Auth(record: record, access: access, refresh: refresh))
         }
     }
 
+    func restoreSessions() {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: config.sessionsRoot.path) else { return }
+        let now = Date()
+
+        struct Candidate {
+            let id: String
+            let dir: URL
+            let meta: [String: Any]
+            let tokens: [String: Any]
+            let lastActive: Date
+        }
+        var candidates: [Candidate] = []
+        for name in names where !name.hasPrefix(".") {
+            let dir = config.sessionsRoot.appendingPathComponent(name)
+            var isDirectory: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { continue }
+            guard let metaData = try? Data(contentsOf: dir.appendingPathComponent("meta.json")),
+                  let meta = (try? JSONSerialization.jsonObject(with: metaData)) as? [String: Any],
+                  let tokenData = try? Data(contentsOf: dir.appendingPathComponent("tokens.json")),
+                  let tokens = (try? JSONSerialization.jsonObject(with: tokenData)) as? [String: Any],
+                  let refreshExpires = tokens["refreshExpires"] as? Double,
+                  refreshExpires > now.timeIntervalSince1970 else {
+                try? fm.removeItem(at: dir)
+                continue
+            }
+            let lastActive = Date(timeIntervalSince1970: (meta["lastActive"] as? Double) ?? 0)
+            candidates.append(Candidate(id: name, dir: dir, meta: meta,
+                                        tokens: tokens, lastActive: lastActive))
+        }
+
+        candidates.sort { $0.lastActive > $1.lastActive }
+        let limit = config.singleUser ? 1 : config.maxSessions
+        for dropped in candidates.dropFirst(limit) { try? fm.removeItem(at: dropped.dir) }
+
+        for candidate in candidates.prefix(limit) {
+            killStaleChromium(pid_t((candidate.meta["pid"] as? Int) ?? -1))
+            let profileDir = candidate.dir.appendingPathComponent("profile")
+            for lockFile in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
+                try? fm.removeItem(at: profileDir.appendingPathComponent(lockFile))
+            }
+
+            let acceptLanguage = candidate.meta["acceptLanguage"] as? String
+            let made = makeBrowser(profileDir: profileDir,
+                                   downloadsDir: candidate.dir.appendingPathComponent("downloads"),
+                                   acceptLanguage: acceptLanguage,
+                                   restoreTabs: (candidate.meta["tabs"] as? [String]) ?? [],
+                                   restoreActiveIndex: (candidate.meta["activeTab"] as? Int) ?? 0)
+            guard case .success(let browser) = made else {
+                fputs("Kraken: could not restore session \(candidate.id)\n", stderr)
+                try? fm.removeItem(at: candidate.dir)
+                continue
+            }
+
+            let record = SessionRecord(id: candidate.id, browser: browser, dir: candidate.dir,
+                                       pid: browser.processID,
+                                       acceptLanguage: acceptLanguage, now: now)
+            record.tabs = (candidate.meta["tabs"] as? [String]) ?? []
+            record.activeTabIndex = (candidate.meta["activeTab"] as? Int) ?? 0
+            wire(record)
+
+            lock.lock()
+            sessions[candidate.id] = record
+            if config.singleUser { claimedSessionID = candidate.id }
+            if let access = candidate.tokens["access"] as? String,
+               let expires = candidate.tokens["accessExpires"] as? Double {
+                accessTokens[access] = (candidate.id, Date(timeIntervalSince1970: expires))
+            }
+            if let refresh = candidate.tokens["refresh"] as? String,
+               let expires = candidate.tokens["refreshExpires"] as? Double {
+                refreshTokens[refresh] = (candidate.id, Date(timeIntervalSince1970: expires))
+            }
+            lock.unlock()
+
+            writeMeta(record, now: now)
+            print("Kraken: restored session \(candidate.id)")
+        }
+    }
+
+    private func killStaleChromium(_ pid: pid_t) {
+        guard pid > 0, kill(pid, 0) == 0 else { return }
+        // Only signal a PID we can confirm is a Chromium; PIDs may have been recycled.
+        #if os(Linux)
+        guard let cmdline = try? String(contentsOfFile: "/proc/\(pid)/cmdline", encoding: .utf8),
+              cmdline.localizedCaseInsensitiveContains("chrom") else { return }
+        kill(pid, SIGKILL)
+        #endif
+    }
+
     private func makeBrowser(profileDir: URL, downloadsDir: URL,
-                             acceptLanguage: String?) -> Result<BrowserSession, Error> {
+                             acceptLanguage: String?,
+                             restoreTabs: [String] = [],
+                             restoreActiveIndex: Int = 0) -> Result<BrowserSession, Error> {
         func build() -> Result<BrowserSession, Error> {
             Result {
                 try BrowserSession(chromiumPath: config.chromiumPath,
                                    homepage: config.homepage,
                                    profileDir: profileDir,
                                    downloadsDir: downloadsDir,
-                                   acceptLanguage: acceptLanguage)
+                                   acceptLanguage: acceptLanguage,
+                                   restoreTabs: restoreTabs,
+                                   restoreActiveIndex: restoreActiveIndex)
             }
         }
         if Thread.isMainThread { return build() }
@@ -185,6 +292,13 @@ final class SessionManager {
         record.browser.onDownloads = { [weak self] json in self?.sendDownloads(id, json) }
         record.browser.onFrame = { [weak self] data in self?.sendFrame(id, data) }
         record.browser.onPicker = { [weak self] json in self?.sendPicker(id, json) }
+        record.browser.onCopyText = { [weak self] json in self?.sendCopyText(id, json) }
+        record.browser.onTabsPersist = { [weak self, weak record] urls, activeIndex in
+            guard let self, let record else { return }
+            record.tabs = urls
+            record.activeTabIndex = activeIndex
+            self.writeMeta(record, now: record.lastActive)
+        }
         record.browser.onProcessExit = { [weak self] in self?.remove(id) }
     }
 
@@ -253,10 +367,26 @@ final class SessionManager {
     }
 
     private func writeMeta(_ record: SessionRecord, now: Date) {
-        let object: [String: Any] = ["pid": Int(record.pid),
-                                     "lastActive": now.timeIntervalSince1970]
+        var object: [String: Any] = ["pid": Int(record.pid),
+                                     "lastActive": now.timeIntervalSince1970,
+                                     "tabs": record.tabs,
+                                     "activeTab": record.activeTabIndex]
+        if let acceptLanguage = record.acceptLanguage {
+            object["acceptLanguage"] = acceptLanguage
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
         try? data.write(to: record.dir.appendingPathComponent("meta.json"), options: .atomic)
+    }
+
+    private func writeTokens(_ record: SessionRecord, access: String, refresh: String, now: Date) {
+        let object: [String: Any] = [
+            "access": access,
+            "accessExpires": now.addingTimeInterval(accessTTL).timeIntervalSince1970,
+            "refresh": refresh,
+            "refreshExpires": now.addingTimeInterval(refreshTTL).timeIntervalSince1970
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        try? data.write(to: record.dir.appendingPathComponent("tokens.json"), options: .atomic)
     }
 
     static func randomToken(_ bytes: Int = 32) -> String {

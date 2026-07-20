@@ -20,7 +20,7 @@ func runHeadless() {
 
     let httpPort = environment["KRAKEN_HTTP_PORT"].flatMap { UInt16($0) } ?? 8080
     let homepage = environment["KRAKEN_HOMEPAGE"].flatMap { $0.isEmpty ? nil : $0 }
-        ?? "https://www.startpage.com"
+        ?? "https://github.com/katagaki/Kraken3"
 
     let sessionsRoot: URL = {
         if let override = environment["KRAKEN_SESSIONS_DIR"], !override.isEmpty {

@@ -7,6 +7,11 @@ let controlPageHTML = #"""
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#161616">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="64x64" href="/favicon.png">
 <title>Kraken</title>
 <style>
   :root {
@@ -221,7 +226,7 @@ let controlPageHTML = #"""
     border: none;
   }
 
-  #dlPanel, #pastePanel {
+  #dlPanel, #pastePanel, #copyPanel {
     position: absolute;
     inset: 0;
     background: var(--cds-overlay);
@@ -229,8 +234,9 @@ let controlPageHTML = #"""
   }
   #dlPanel { z-index: 10; }
   #pastePanel { z-index: 11; }
-  #dlPanel.open, #pastePanel.open { display: block; }
-  #dlSheet, #pasteSheet {
+  #copyPanel { z-index: 11; }
+  #dlPanel.open, #pastePanel.open, #copyPanel.open { display: block; }
+  #dlSheet, #pasteSheet, #copySheet {
     position: absolute;
     left: 0; right: 0; bottom: 0;
     background: var(--cds-layer);
@@ -241,7 +247,7 @@ let controlPageHTML = #"""
     max-height: 70%;
     overflow-y: auto;
   }
-  #dlSheet h2, #pasteSheet h2 {
+  #dlSheet h2, #pasteSheet h2, #copySheet h2 {
     font-size: 16px;
     font-weight: 600;
     color: var(--cds-text-primary);
@@ -285,6 +291,35 @@ let controlPageHTML = #"""
   .dl-item a:active, .dl-item button:active { background: var(--cds-layer-active); }
   .dl-item svg { width: 18px; height: 18px; fill: currentColor; }
   .dl-empty { color: var(--cds-text-helper); font-size: 14px; padding: 12px 0; }
+
+  #copyText {
+    width: 100%;
+    height: 140px;
+    border: none;
+    border-bottom: 1px solid var(--cds-border-strong);
+    border-radius: 0;
+    background: var(--cds-field-02);
+    color: var(--cds-text-primary);
+    font-family: inherit;
+    font-size: 16px;
+    padding: 10px 16px;
+    outline: none;
+    resize: none;
+  }
+  #copyActions { display: flex; gap: 8px; margin-top: 16px; }
+  #copyActions button {
+    flex: 1;
+    height: 48px;
+    border: none;
+    border-radius: 0;
+    font-family: inherit;
+    font-size: 14px;
+    padding: 0 16px;
+  }
+  #copyClose { background: var(--cds-field-02); color: var(--cds-text-primary); }
+  #copyClose:active { background: var(--cds-layer-active); }
+  #copyDo { background: var(--cds-interactive); color: #ffffff; }
+  #copyDo:active { background: var(--cds-interactive-active); }
 
   #pasteText {
     width: 100%;
@@ -478,7 +513,7 @@ let controlPageHTML = #"""
   </div>
   <div id="progress"></div>
   <div id="screenWrap">
-    <img id="screen" alt="">
+    <canvas id="screen"></canvas>
     <div id="overlay"></div>
     <div id="status"></div>
     <div id="dragHint">Drag mode</div>
@@ -502,6 +537,16 @@ let controlPageHTML = #"""
                   autocorrect="off" autocomplete="off" spellcheck="false"></textarea>
         <button id="pasteSend">Send to focused field</button>
         <div id="pasteHint">Text is typed into whatever field is focused in the remote browser.</div>
+      </div>
+    </div>
+    <div id="copyPanel">
+      <div id="copySheet">
+        <h2>Copy from page</h2>
+        <textarea id="copyText" readonly></textarea>
+        <div id="copyActions">
+          <button id="copyClose">Close</button>
+          <button id="copyDo">Copy</button>
+        </div>
       </div>
     </div>
     <div id="dlPanel">
@@ -554,7 +599,9 @@ let controlPageHTML = #"""
           errDnsMsg: 'The server address could not be found. Check the address and try again.',
           errGenericTitle: 'This page can’t be loaded',
           errGenericMsg: 'The page could not be loaded. The server may be unreachable or refusing connections.',
-          errRetry: 'Try again', errDismiss: 'Dismiss' },
+          errRetry: 'Try again', errDismiss: 'Dismiss',
+          copyTitle: 'Copy from page', copy: 'Copy', close: 'Close',
+          copied: 'Copied', noText: 'No text found there' },
     ja: { back: '戻る', forward: '進む', reload: '再読み込み',
           newTab: '新しいタブ', paste: '貼り付け',
           keyboard: 'キーボード', downloads: 'ダウンロード',
@@ -576,7 +623,9 @@ let controlPageHTML = #"""
           errDnsMsg: 'サーバーのアドレスが見つかりませんでした。アドレスを確認してもう一度お試しください。',
           errGenericTitle: 'ページを読み込めません',
           errGenericMsg: 'ページを読み込めませんでした。サーバーに接続できないか、接続が拒否されました。',
-          errRetry: '再試行', errDismiss: '閉じる' }
+          errRetry: '再試行', errDismiss: '閉じる',
+          copyTitle: 'ページからコピー', copy: 'コピー', close: '閉じる',
+          copied: 'コピーしました', noText: 'テキストが見つかりません' }
   };
   var LANG = (navigator.language || 'en').toLowerCase().indexOf('ja') === 0 ? 'ja' : 'en';
   var T = I18N[LANG];
@@ -593,8 +642,54 @@ let controlPageHTML = #"""
   var keyboardInput = document.getElementById('keyboardInput');
   var dlPanel = document.getElementById('dlPanel');
   var dlList = document.getElementById('dlList');
-  var frameURL = null;
   var urlFocused = false;
+
+  var ctx = screenEl.getContext('2d');
+  var drawChain = Promise.resolve();
+
+  function toDrawable(blob) {
+    if (window.createImageBitmap) return createImageBitmap(blob);
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(blob);
+      var img = new Image();
+      img.onload = function () { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('decode')); };
+      img.src = url;
+    });
+  }
+
+  function enqueueFrame(buffer) {
+    drawChain = drawChain.then(function () { return drawFrame(buffer); })
+                         .catch(function () {});
+  }
+
+  function drawFrame(buffer) {
+    var dv = new DataView(buffer);
+    if (buffer.byteLength < 20 || dv.getUint8(0) !== 0x4B || dv.getUint8(1) !== 0x46) return;
+    var kind = dv.getUint8(3);
+    var seq = dv.getUint32(4);
+    var x = dv.getUint16(8), y = dv.getUint16(10);
+    var fullW = dv.getUint16(16), fullH = dv.getUint16(18);
+    var blob = new Blob([new Uint8Array(buffer, 20)],
+                        { type: kind === 0 ? 'image/jpeg' : 'image/png' });
+    return toDrawable(blob).then(function (bmp) {
+      var bw = bmp.width || bmp.naturalWidth, bh = bmp.height || bmp.naturalHeight;
+      if (kind === 2) {
+        if (screenEl.width === fullW && screenEl.height === fullH) ctx.drawImage(bmp, x, y);
+      } else {
+        if (screenEl.width !== bw || screenEl.height !== bh) {
+          screenEl.width = bw;
+          screenEl.height = bh;
+          updateFitMode();
+        }
+        ctx.drawImage(bmp, 0, 0);
+      }
+      if (bmp.close) bmp.close();
+      send({ type: 'frameack', seq: seq });
+    }).catch(function () {
+      send({ type: 'frameack', seq: seq });
+    });
+  }
 
   function send(obj) {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -644,7 +739,7 @@ let controlPageHTML = #"""
 
   function connect() {
     ws = new WebSocket(wsURL);
-    ws.binaryType = 'blob';
+    ws.binaryType = 'arraybuffer';
     ws.onopen = function () {
       disconnectedEl.style.display = 'none';
       sendViewport();
@@ -655,14 +750,8 @@ let controlPageHTML = #"""
       setTimeout(connect, 1500);
     };
     ws.onmessage = function (event) {
-      if (event.data instanceof Blob) {
-        var next = URL.createObjectURL(event.data);
-        screenEl.onload = function () {
-          if (frameURL) URL.revokeObjectURL(frameURL);
-          frameURL = next;
-          updateFitMode();
-        };
-        screenEl.src = next;
+      if (event.data instanceof ArrayBuffer) {
+        enqueueFrame(event.data);
         return;
       }
       var msg;
@@ -670,6 +759,7 @@ let controlPageHTML = #"""
       if (msg.type === 'state') handleState(msg);
       else if (msg.type === 'downloads') renderDownloads(msg.items || []);
       else if (msg.type === 'picker') openPicker(msg);
+      else if (msg.type === 'copytext') handleCopyText(msg.text || '');
     };
   }
 
@@ -761,7 +851,7 @@ let controlPageHTML = #"""
   var screenFillMode = false;
   function updateFitMode() {
     var box = screenEl.getBoundingClientRect();
-    var nw = screenEl.naturalWidth, nh = screenEl.naturalHeight;
+    var nw = screenEl.width, nh = screenEl.height;
     if (!nw || !nh || !box.width || !box.height) return;
     var ratioDiff = Math.abs((nw / nh) / (box.width / box.height) - 1);
     screenFillMode = ratioDiff < 0.02;
@@ -770,7 +860,7 @@ let controlPageHTML = #"""
 
   function contentRect() {
     var box = screenEl.getBoundingClientRect();
-    var nw = screenEl.naturalWidth, nh = screenEl.naturalHeight;
+    var nw = screenEl.width, nh = screenEl.height;
     if (!nw || !nh) return null;
     if (screenFillMode) {
       return { x: box.left, y: box.top, w: box.width, h: box.height };
@@ -816,6 +906,7 @@ let controlPageHTML = #"""
 
   function cancelTouch() {
     if (!touch) return;
+    clearTimeout(touch.lpTimer);
     if (touch.dragging) {
       var point = normalized(touch.lastX, touch.lastY);
       send({ type: 'dragend', x: point ? point.x : 0.5, y: point ? point.y : 0.5 });
@@ -849,6 +940,16 @@ let controlPageHTML = #"""
         dragHintEl.style.display = 'block';
         send({ type: 'dragstart', x: point.x, y: point.y });
       }
+    } else {
+      current.lpTimer = setTimeout(function () {
+        if (touch !== current || current.moved || current.dragging) return;
+        current.longPressed = true;
+        var at = normalized(current.startX, current.startY);
+        if (at) {
+          if (navigator.vibrate) navigator.vibrate(10);
+          send({ type: 'copytext', x: at.x, y: at.y });
+        }
+      }, 500);
     }
   }, { passive: false });
 
@@ -884,6 +985,7 @@ let controlPageHTML = #"""
     }
     if (Math.abs(t.clientX - touch.startX) > 8 || Math.abs(t.clientY - touch.startY) > 8) {
       touch.moved = true;
+      clearTimeout(touch.lpTimer);
     }
     if (touch.moved) {
       if (zoom > 1) {
@@ -915,8 +1017,13 @@ let controlPageHTML = #"""
       return;
     }
     if (!touch) return;
+    clearTimeout(touch.lpTimer);
     if (touch.dragging) {
       cancelTouch();
+      return;
+    }
+    if (touch.longPressed) {
+      touch = null;
       return;
     }
     var wasTap = !touch.moved && (Date.now() - touch.startTime) < 600;
@@ -938,6 +1045,11 @@ let controlPageHTML = #"""
   overlay.addEventListener('click', function (event) {
     var point = normalized(event.clientX, event.clientY);
     if (point) send({ type: 'tap', x: point.x, y: point.y });
+  });
+  overlay.addEventListener('contextmenu', function (event) {
+    event.preventDefault();
+    var point = normalized(event.clientX, event.clientY);
+    if (point) send({ type: 'copytext', x: point.x, y: point.y });
   });
   overlay.addEventListener('wheel', function (event) {
     event.preventDefault();
@@ -989,7 +1101,8 @@ let controlPageHTML = #"""
   var pasteTextField = document.getElementById('pasteText');
   document.addEventListener('keydown', function (event) {
     var active = document.activeElement;
-    if (active === urlField || active === keyboardInput || active === pasteTextField) return;
+    if (active === urlField || active === keyboardInput || active === pasteTextField ||
+        active === copyTextField) return;
     if (event.metaKey || event.ctrlKey || event.altKey) return;
     var special = ['Enter', 'Backspace', 'Tab', 'Escape',
                    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
@@ -1000,6 +1113,54 @@ let controlPageHTML = #"""
       event.preventDefault();
       send({ type: 'text', value: event.key });
     }
+  });
+
+  var flashTimer = null;
+  function flash(message) {
+    statusEl.textContent = message;
+    statusEl.style.display = 'block';
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(function () { statusEl.style.display = 'none'; }, 1400);
+  }
+
+  var copyPanel = document.getElementById('copyPanel');
+  var copyTextField = document.getElementById('copyText');
+
+  function handleCopyText(text) {
+    if (!text) { flash(T.noText); return; }
+    copyTextField.value = text;
+    copyPanel.classList.add('open');
+  }
+
+  function fallbackCopy() {
+    copyTextField.readOnly = false;
+    copyTextField.select();
+    copyTextField.setSelectionRange(0, copyTextField.value.length);
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) {}
+    copyTextField.readOnly = true;
+    copyTextField.blur();
+    if (ok) {
+      copyPanel.classList.remove('open');
+      flash(T.copied);
+    }
+  }
+
+  document.getElementById('copyDo').addEventListener('click', function () {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(copyTextField.value).then(function () {
+        copyPanel.classList.remove('open');
+        flash(T.copied);
+      }).catch(fallbackCopy);
+    } else {
+      fallbackCopy();
+    }
+  });
+  document.getElementById('copyClose').addEventListener('click', function () {
+    copyPanel.classList.remove('open');
+  });
+  copyPanel.addEventListener('click', function (event) {
+    if (event.target === copyPanel) copyPanel.classList.remove('open');
   });
 
   var pastePanel = document.getElementById('pastePanel');
@@ -1228,11 +1389,19 @@ let controlPageHTML = #"""
     if (pasteTextField) pasteTextField.placeholder = T.pasteHere;
     var downloadsTitleEl = document.querySelector('#dlSheet h2');
     if (downloadsTitleEl) downloadsTitleEl.textContent = T.downloads;
+    var copyTitleEl = document.querySelector('#copySheet h2');
+    if (copyTitleEl) copyTitleEl.textContent = T.copyTitle;
+    document.getElementById('copyDo').textContent = T.copy;
+    document.getElementById('copyClose').textContent = T.close;
     errRetryBtn.textContent = T.errRetry;
     document.getElementById('errDismiss').textContent = T.errDismiss;
     dlList.innerHTML = '<div class="dl-empty">' + T.noDownloads + '</div>';
   }
   localizeStatic();
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(function () {});
+  }
 
   connect();
 })();

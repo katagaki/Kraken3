@@ -12,7 +12,7 @@ docker compose up -d --build
 
 ## Environment variables
 
-- `KRAKEN_HOMEPAGE`: homepage for new tabs (default `https://www.startpage.com`)
+- `KRAKEN_HOMEPAGE`: homepage for new tabs (default `https://github.com/katagaki/Kraken3`)
 - `KRAKEN_HTTP_PORT`: listen port for the UI and control WebSocket (default `8080`)
 - `KRAKEN_SESSIONS_DIR`: where per-session profiles + downloads live (default `/data/sessions`)
 - `KRAKEN_SINGLE_USER`: `1` locks Kraken to the first client that connects; every
@@ -32,6 +32,9 @@ view over a WebSocket on the same origin (`/ws`).
   tokens are stored in `HttpOnly`, `SameSite=Lax` cookies and rotated on every
   request. A single-user mode (`KRAKEN_SINGLE_USER=1`) instead locks Kraken to the
   first client and refuses all others.
+- **Sessions survive restarts.** Tokens, open tabs, and the browser profile are
+  persisted per session, so a server restart relaunches each session's Chromium
+  with its tabs and logins intact — clients reconnect without signing in again.
 - **Idle cleanup.** A separate `kraken-reaper` process terminates a session's
   Chromium and deletes its directory after `KRAKEN_SESSION_TIMEOUT` seconds of
   inactivity.
@@ -45,8 +48,20 @@ view over a WebSocket on the same origin (`/ws`).
 
 - **Tab bar**: scrollable tabs; tap to switch, ✕ to close, + for a new tab. Popups
   open as new tabs.
-- **Live view**: tap to click, drag to scroll, pinch to zoom.
+- **Live view**: tap to click, drag to scroll, pinch to zoom, double-tap to drag.
+- **Copy text**: long-press (or right-click on desktop) copies the text under
+  your finger — or the page's current selection — into a sheet on the phone.
 - **Address bar**: address or search terms.
 - **Paste/Keyboard**: send clipboard text, or forward iPhone keystrokes, into the
   focused field.
 - **Downloads**: progress bars; save a finished file to the phone or delete it.
+- **Add to Home Screen**: the control page is an installable PWA with its own
+  icon and standalone chrome.
+
+## Streaming
+
+The live view sends only the changed region of each frame as a lossless PNG tile
+composited onto a canvas. Sustained large changes (video, scrolling) switch to
+JPEG streaming, and calm pages switch back. The client acknowledges every frame,
+so a slow link conflates to the newest frame instead of building a backlog, and
+JPEG quality steps down under pressure and recovers when the link is healthy.

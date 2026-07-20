@@ -118,9 +118,11 @@ final class HeadlessHTTPServer {
             "HTTP/1.1 \(response.status)",
             "Content-Type: \(response.contentType)",
             "Content-Length: \(response.body.count)",
-            "Cache-Control: no-store",
             "Connection: close"
         ]
+        if response.extraHeaders["Cache-Control"] == nil {
+            headers.append("Cache-Control: no-store")
+        }
         for (key, value) in response.extraHeaders {
             headers.append("\(key): \(value)")
         }

@@ -17,6 +17,7 @@ final class KrakenServer {
         sessions.sendState = { [weak self] sid, json in self?.ws.sendJSON(toSession: sid, json) }
         sessions.sendDownloads = { [weak self] sid, json in self?.ws.sendJSON(toSession: sid, json) }
         sessions.sendPicker = { [weak self] sid, json in self?.ws.sendJSON(toSession: sid, json) }
+        sessions.sendCopyText = { [weak self] sid, json in self?.ws.sendJSON(toSession: sid, json) }
         sessions.sendFrame = { [weak self] sid, data in self?.ws.sendFrame(toSession: sid, data) }
         sessions.closeClients = { [weak self] sid in self?.ws.closeSession(sid) }
         sessions.connectedSessions = { [weak self] in self?.ws.sessionsWithClients() ?? [] }
@@ -38,6 +39,7 @@ final class KrakenServer {
             self?.sessions.browser(sid)?.syncNewClient()
         }
 
+        sessions.restoreSessions()
         try http.start(port: config.httpPort)
         sessions.startHeartbeat()
         launchReaper()
@@ -69,6 +71,23 @@ final class KrakenServer {
         switch (request.method, request.path) {
         case ("GET", "/"), ("GET", "/index.html"):
             return serveControlPage(request)
+
+        case ("GET", "/manifest.webmanifest"):
+            return staticAsset(Data(StaticAssets.manifest.utf8), "application/manifest+json")
+        case ("GET", "/sw.js"):
+            return staticAsset(Data(StaticAssets.serviceWorker.utf8), "text/javascript")
+        case ("GET", "/icon-192.png"):
+            return staticAsset(StaticAssets.icon192, "image/png")
+        case ("GET", "/icon-512.png"):
+            return staticAsset(StaticAssets.icon512, "image/png")
+        case ("GET", "/icon-maskable-192.png"):
+            return staticAsset(StaticAssets.iconMaskable192, "image/png")
+        case ("GET", "/icon-maskable-512.png"):
+            return staticAsset(StaticAssets.iconMaskable512, "image/png")
+        case ("GET", "/apple-touch-icon.png"), ("GET", "/apple-touch-icon-precomposed.png"):
+            return staticAsset(StaticAssets.icon180, "image/png")
+        case ("GET", "/favicon.png"), ("GET", "/favicon.ico"):
+            return staticAsset(StaticAssets.favicon, "image/png")
 
         case ("GET", "/files"):
             guard let auth = sessions.authenticate(request.cookies) else { return unauthorized() }
@@ -132,6 +151,12 @@ final class KrakenServer {
         HTTPResponse.text("401 Unauthorized", "unauthorized")
     }
 
+    private func staticAsset(_ body: Data, _ contentType: String) -> HTTPResponse {
+        var response = HTTPResponse(status: "200 OK", body: body, contentType: contentType)
+        response.extraHeaders["Cache-Control"] = "public, max-age=86400"
+        return response
+    }
+
     private func authed(status: String, body: Data, contentType: String, auth: SessionManager.Auth) -> HTTPResponse {
         HTTPResponse(status: status, body: body, contentType: contentType,
                      setCookies: [
@@ -146,11 +171,22 @@ final class KrakenServer {
 
     private func launchReaper() {
         let environment = ProcessInfo.processInfo.environment
-        let exeDir = URL(fileURLWithPath: CommandLine.arguments.first ?? "kraken")
-            .deletingLastPathComponent().path
-        let reaperPath = environment["KRAKEN_REAPER"] ?? (exeDir + "/kraken-reaper")
-        guard FileManager.default.isExecutableFile(atPath: reaperPath) else {
-            fputs("Kraken: reaper not found at \(reaperPath); idle sessions will not be reaped\n", stderr)
+        // argv[0] is a bare name when launched via PATH (e.g. Docker CMD ["kraken"]),
+        // so resolve the real executable location first.
+        var candidates: [String] = []
+        if let override = environment["KRAKEN_REAPER"] { candidates.append(override) }
+        if let exe = Bundle.main.executablePath {
+            candidates.append(URL(fileURLWithPath: exe).deletingLastPathComponent()
+                .appendingPathComponent("kraken-reaper").path)
+        }
+        candidates.append(URL(fileURLWithPath: CommandLine.arguments.first ?? "kraken")
+            .deletingLastPathComponent().appendingPathComponent("kraken-reaper").path)
+        candidates.append("/usr/local/bin/kraken-reaper")
+
+        guard let reaperPath = candidates.first(where: {
+            FileManager.default.isExecutableFile(atPath: $0)
+        }) else {
+            fputs("Kraken: reaper not found (tried \(candidates.joined(separator: ", "))); idle sessions will not be reaped\n", stderr)
             return
         }
         var childEnv = environment

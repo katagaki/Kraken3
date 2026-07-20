@@ -1,4 +1,6 @@
 FROM swift:6.3.3-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY Package.swift ./
 COPY Sources ./Sources
