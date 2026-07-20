@@ -322,6 +322,80 @@ let controlPageHTML = #"""
   #pasteSend:active { background: var(--cds-interactive-active); }
   #pasteHint { font-size: 12px; color: var(--cds-text-helper); margin-top: 8px; }
 
+  #pickerPanel {
+    position: absolute;
+    inset: 0;
+    background: var(--cds-overlay);
+    display: none;
+    z-index: 12;
+  }
+  #pickerPanel.open { display: block; }
+  #pickerSheet {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    background: var(--cds-layer);
+    border-top: 1px solid var(--cds-border-subtle);
+    padding: 16px;
+    max-height: 70%;
+    display: flex;
+    flex-direction: column;
+  }
+  #pickerSheet h2 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--cds-text-primary);
+    margin-bottom: 12px;
+  }
+  #pickerBody { overflow-y: auto; }
+  .picker-opt {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--cds-border-subtle);
+    border-radius: 0;
+    color: var(--cds-text-primary);
+    font-family: inherit;
+    font-size: 16px;
+    padding: 12px 16px;
+  }
+  .picker-opt:active { background: var(--cds-layer-active); }
+  .picker-opt.selected {
+    background: var(--cds-field-02);
+    font-weight: 600;
+  }
+  .picker-opt:disabled { color: var(--cds-text-helper); }
+  .picker-input {
+    width: 100%;
+    border: none;
+    border-bottom: 1px solid var(--cds-border-strong);
+    border-radius: 0;
+    background: var(--cds-field-02);
+    color: var(--cds-text-primary);
+    font-family: inherit;
+    font-size: 16px;
+    padding: 10px 16px;
+    outline: none;
+  }
+  .picker-input:focus {
+    outline: 2px solid var(--cds-focus);
+    outline-offset: -2px;
+  }
+  #pickerActions { display: flex; gap: 8px; margin-top: 16px; }
+  .picker-btn {
+    flex: 1;
+    height: 48px;
+    border: none;
+    border-radius: 0;
+    font-family: inherit;
+    font-size: 14px;
+    padding: 0 16px;
+  }
+  .picker-cancel { background: var(--cds-field-02); color: var(--cds-text-primary); }
+  .picker-done { background: var(--cds-interactive); color: #ffffff; }
+  .picker-done:active { background: var(--cds-interactive-active); }
+
   #disconnected {
     position: absolute;
     inset: 0;
@@ -368,6 +442,13 @@ let controlPageHTML = #"""
         <div id="dlList"><div class="dl-empty">No downloads yet</div></div>
       </div>
     </div>
+    <div id="pickerPanel">
+      <div id="pickerSheet">
+        <h2 id="pickerTitle"></h2>
+        <div id="pickerBody"></div>
+        <div id="pickerActions"></div>
+      </div>
+    </div>
   </div>
   <div id="topbar">
     <button id="btnBack" title="Back"><svg viewBox="0 0 32 32"><path d="M14 26 15.41 24.59 7.83 17 28 17 28 15 7.83 15 15.41 7.41 14 6 4 16 14 26z"/></svg></button>
@@ -395,7 +476,10 @@ let controlPageHTML = #"""
           pasteSend: 'Send to focused field',
           pasteHint: 'Text is typed into whatever field is focused in the remote browser.',
           pasteHere: 'Paste text here', noDownloads: 'No downloads yet',
-          failed: 'Failed', downloading: 'downloading', of: 'of', loading: 'Loading ' },
+          failed: 'Failed', downloading: 'downloading', of: 'of', loading: 'Loading ',
+          pickSelect: 'Choose an option', pickDate: 'Choose a value',
+          pickColor: 'Choose a color', pickInput: 'Enter a value',
+          done: 'Done', cancel: 'Cancel' },
     ja: { back: '戻る', forward: '進む', reload: '再読み込み',
           newTab: '新しいタブ', paste: '貼り付け',
           keyboard: 'キーボード', downloads: 'ダウンロード',
@@ -407,7 +491,10 @@ let controlPageHTML = #"""
           pasteHere: 'ここにテキストを貼り付け',
           noDownloads: 'ダウンロードはまだありません',
           failed: '失敗', downloading: 'ダウンロード中', of: '/',
-          loading: '読み込み中 ' }
+          loading: '読み込み中 ',
+          pickSelect: '選択してください', pickDate: '値を選択',
+          pickColor: '色を選択', pickInput: '値を入力',
+          done: '完了', cancel: 'キャンセル' }
   };
   var LANG = (navigator.language || 'en').toLowerCase().indexOf('ja') === 0 ? 'ja' : 'en';
   var T = I18N[LANG];
@@ -500,6 +587,7 @@ let controlPageHTML = #"""
       try { msg = JSON.parse(event.data); } catch (e) { return; }
       if (msg.type === 'state') handleState(msg);
       else if (msg.type === 'downloads') renderDownloads(msg.items || []);
+      else if (msg.type === 'picker') openPicker(msg);
     };
   }
 
@@ -834,6 +922,115 @@ let controlPageHTML = #"""
   });
   dlPanel.addEventListener('click', function (event) {
     if (event.target === dlPanel) dlPanel.classList.remove('open');
+  });
+
+  var pickerPanel = document.getElementById('pickerPanel');
+  var pickerTitle = document.getElementById('pickerTitle');
+  var pickerBody = document.getElementById('pickerBody');
+  var pickerActions = document.getElementById('pickerActions');
+  var pickerOpen = false;
+
+  function openPicker(msg) {
+    pickerBody.innerHTML = '';
+    pickerActions.innerHTML = '';
+    if (msg.kind === 'select') {
+      pickerTitle.textContent = T.pickSelect;
+      buildSelectPicker(msg);
+    } else if (msg.kind === 'datalist') {
+      pickerTitle.textContent = T.pickInput;
+      buildInputPicker(msg, 'text', msg.options);
+    } else if (msg.kind === 'color') {
+      pickerTitle.textContent = T.pickColor;
+      buildInputPicker(msg, 'color', null);
+    } else {
+      pickerTitle.textContent = T.pickDate;
+      buildInputPicker(msg, msg.kind, null);
+    }
+    pickerOpen = true;
+    pickerPanel.classList.add('open');
+  }
+
+  function buildSelectPicker(msg) {
+    var multiple = !!msg.multiple;
+    var chosen = {};
+    (msg.options || []).forEach(function (o) { if (o.selected) chosen[o.value] = true; });
+    (msg.options || []).forEach(function (o) {
+      var row = document.createElement('button');
+      row.className = 'picker-opt' + (chosen[o.value] ? ' selected' : '');
+      row.textContent = o.label || o.value;
+      if (o.disabled) row.disabled = true;
+      row.addEventListener('click', function () {
+        if (multiple) {
+          chosen[o.value] = !chosen[o.value];
+          row.classList.toggle('selected');
+        } else {
+          confirmPicker({ value: o.value });
+        }
+      });
+      pickerBody.appendChild(row);
+    });
+    addPickerActions(multiple ? function () {
+      var values = Object.keys(chosen).filter(function (k) { return chosen[k]; });
+      confirmPicker({ values: values });
+    } : null);
+  }
+
+  function buildInputPicker(msg, type, listOptions) {
+    var input = document.createElement('input');
+    input.className = 'picker-input';
+    input.type = type;
+    if (msg.value != null) input.value = msg.value;
+    if (msg.min) input.min = msg.min;
+    if (msg.max) input.max = msg.max;
+    if (msg.step) input.step = msg.step;
+    if (listOptions) {
+      var dl = document.createElement('datalist');
+      dl.id = 'pickerDatalist';
+      listOptions.forEach(function (o) {
+        var opt = document.createElement('option');
+        opt.value = o.value;
+        if (o.label) opt.label = o.label;
+        dl.appendChild(opt);
+      });
+      input.setAttribute('list', 'pickerDatalist');
+      pickerBody.appendChild(dl);
+    }
+    pickerBody.appendChild(input);
+    setTimeout(function () { input.focus(); }, 50);
+    addPickerActions(function () { confirmPicker({ value: input.value }); });
+  }
+
+  function addPickerActions(onDone) {
+    var cancel = document.createElement('button');
+    cancel.className = 'picker-btn picker-cancel';
+    cancel.textContent = T.cancel;
+    cancel.addEventListener('click', cancelPicker);
+    pickerActions.appendChild(cancel);
+    if (onDone) {
+      var done = document.createElement('button');
+      done.className = 'picker-btn picker-done';
+      done.textContent = T.done;
+      done.addEventListener('click', onDone);
+      pickerActions.appendChild(done);
+    }
+  }
+
+  function confirmPicker(result) {
+    if (!pickerOpen) return;
+    pickerOpen = false;
+    pickerPanel.classList.remove('open');
+    send({ type: 'pickresult', value: result.value, values: result.values });
+  }
+
+  function cancelPicker() {
+    if (!pickerOpen) return;
+    pickerOpen = false;
+    pickerPanel.classList.remove('open');
+    send({ type: 'pickresult', cancel: true });
+  }
+
+  pickerPanel.addEventListener('click', function (event) {
+    if (event.target === pickerPanel) cancelPicker();
   });
 
   function formatSize(bytes) {

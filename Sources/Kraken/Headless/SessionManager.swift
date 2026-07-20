@@ -53,6 +53,7 @@ final class SessionManager {
 
     var sendState: (String, [String: Any]) -> Void = { _, _ in }
     var sendDownloads: (String, [String: Any]) -> Void = { _, _ in }
+    var sendPicker: (String, [String: Any]) -> Void = { _, _ in }
     var sendFrame: (String, Data) -> Void = { _, _ in }
     var closeClients: (String) -> Void = { _ in }
     var connectedSessions: () -> Set<String> = { [] }
@@ -183,6 +184,7 @@ final class SessionManager {
         record.browser.onState = { [weak self] json in self?.sendState(id, json) }
         record.browser.onDownloads = { [weak self] json in self?.sendDownloads(id, json) }
         record.browser.onFrame = { [weak self] data in self?.sendFrame(id, data) }
+        record.browser.onPicker = { [weak self] json in self?.sendPicker(id, json) }
         record.browser.onProcessExit = { [weak self] in self?.remove(id) }
     }
 

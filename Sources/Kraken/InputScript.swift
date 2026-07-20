@@ -22,8 +22,89 @@ enum InputScript {
       }
 
       var drag = null;
+      var pendingPicker = null;
+
+      function isVisible(el) {
+        if (!el.getClientRects().length) return false;
+        var style = getComputedStyle(el);
+        return style.visibility !== 'hidden' && style.display !== 'none';
+      }
+
+      // Native popups for these controls (dropdown, date/color pickers, datalist)
+      // render in an OS layer the screencast never captures, so describe the
+      // control to the client and let it show its own picker instead.
+      function pickerInfo(el) {
+        if (!el || el.disabled || el.readOnly || !isVisible(el)) return null;
+        if (el.tagName === 'SELECT') {
+          var options = [];
+          for (var i = 0; i < el.options.length; i++) {
+            var o = el.options[i];
+            options.push({ label: o.label || o.text, value: o.value,
+                           selected: o.selected, disabled: o.disabled });
+          }
+          return { kind: 'select', multiple: !!el.multiple, options: options };
+        }
+        if (el.tagName === 'INPUT') {
+          var type = (el.getAttribute('type') || 'text').toLowerCase();
+          var native = { date: 1, time: 1, 'datetime-local': 1, month: 1, week: 1, color: 1 };
+          if (native[type]) {
+            return { kind: type, value: el.value,
+                     min: el.min || '', max: el.max || '', step: el.step || '' };
+          }
+          if (el.list) {
+            var items = [];
+            for (var j = 0; j < el.list.options.length; j++) {
+              items.push({ label: el.list.options[j].label || '',
+                           value: el.list.options[j].value });
+            }
+            return { kind: 'datalist', value: el.value, options: items };
+          }
+        }
+        return null;
+      }
+
+      function openPicker(el) {
+        var info = pickerInfo(el);
+        if (!info) return false;
+        pendingPicker = el;
+        try { el.focus({ preventScroll: true }); } catch (e) {}
+        if (window.__krakenPicker) { window.__krakenPicker(JSON.stringify(info)); }
+        return true;
+      }
+
+      // Taps arrive as trusted CDP mouse events; catch them here before the
+      // native popup would open and hand the control off to the client.
+      document.addEventListener('mousedown', function (event) {
+        var node = event.target;
+        while (node && node.nodeType === 1 && node !== document.body) {
+          if (node.tagName === 'SELECT' || node.tagName === 'INPUT') {
+            if (openPicker(node)) { event.preventDefault(); }
+            return;
+          }
+          node = node.parentElement;
+        }
+      }, true);
 
       window.__kraken = {
+        setPicker: function (payload) {
+          var el = pendingPicker;
+          pendingPicker = null;
+          if (!el) return;
+          var data = typeof payload === 'string' ? JSON.parse(payload) : payload;
+          if (!data || data.cancel) return;
+          if (el.tagName === 'SELECT' && el.multiple) {
+            var chosen = {};
+            (data.values || []).forEach(function (v) { chosen[v] = true; });
+            for (var i = 0; i < el.options.length; i++) {
+              el.options[i].selected = !!chosen[el.options[i].value];
+            }
+          } else if (data.value != null) {
+            el.value = data.value;
+          }
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        },
+
         tap: function (nx, ny) {
           var x = nx * window.innerWidth, y = ny * window.innerHeight;
           var el = document.elementFromPoint(x, y) || document.body;

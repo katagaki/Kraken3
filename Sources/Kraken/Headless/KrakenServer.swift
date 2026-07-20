@@ -16,6 +16,7 @@ final class KrakenServer {
     func start() throws {
         sessions.sendState = { [weak self] sid, json in self?.ws.sendJSON(toSession: sid, json) }
         sessions.sendDownloads = { [weak self] sid, json in self?.ws.sendJSON(toSession: sid, json) }
+        sessions.sendPicker = { [weak self] sid, json in self?.ws.sendJSON(toSession: sid, json) }
         sessions.sendFrame = { [weak self] sid, data in self?.ws.sendFrame(toSession: sid, data) }
         sessions.closeClients = { [weak self] sid in self?.ws.closeSession(sid) }
         sessions.connectedSessions = { [weak self] in self?.ws.sessionsWithClients() ?? [] }

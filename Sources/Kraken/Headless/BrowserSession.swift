@@ -22,6 +22,7 @@ final class BrowserSession {
     var onState: (([String: Any]) -> Void)?
     var onDownloads: (([String: Any]) -> Void)?
     var onFrame: ((Data) -> Void)?
+    var onPicker: (([String: Any]) -> Void)?
     var onProcessExit: (() -> Void)?
 
     private var tabs: [HeadlessTab] = []
@@ -128,8 +129,11 @@ final class BrowserSession {
             guard let self, let sessionId = result["sessionId"] as? String else { return }
             tab.sessionId = sessionId
             self.cdp.send("Page.enable", sessionId: sessionId)
+            self.cdp.send("Runtime.enable", sessionId: sessionId)
+            self.cdp.send("Runtime.addBinding", ["name": "__krakenPicker"], sessionId: sessionId)
             self.cdp.send("Page.addScriptToEvaluateOnNewDocument",
                           ["source": InputScript.source], sessionId: sessionId)
+            self.cdp.send("Runtime.evaluate", ["expression": InputScript.source], sessionId: sessionId)
             self.configureSession(tab, reload: false)
             if let destination = navigateTo, let url = Navigation.destinationURL(for: destination) {
                 self.cdp.send("Page.navigate", ["url": url.absoluteString], sessionId: sessionId)
@@ -256,6 +260,15 @@ final class BrowserSession {
                 self?.broadcastState()
             }
 
+        case "Runtime.bindingCalled":
+            guard sessionId == activeTab?.sessionId,
+                  (params["name"] as? String) == "__krakenPicker",
+                  let payload = params["payload"] as? String,
+                  let data = payload.data(using: .utf8),
+                  var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+            object["type"] = "picker"
+            onPicker?(object)
+
         case "Browser.downloadWillBegin":
             guard let guid = params["guid"] as? String else { return }
             downloads.handleWillBegin(guid: guid,
@@ -334,6 +347,10 @@ final class BrowserSession {
             if let value = message["value"] as? String, let sessionId = activeTab?.sessionId {
                 cdp.send("Input.insertText", ["text": value], sessionId: sessionId)
             }
+        case "pickresult":
+            var payload = message
+            payload.removeValue(forKey: "type")
+            callHelper("setPicker", [payload])
         case "viewport":
             if let width = doubleValue(message["width"]), let height = doubleValue(message["height"]) {
                 applyViewport(width: width, height: height,
