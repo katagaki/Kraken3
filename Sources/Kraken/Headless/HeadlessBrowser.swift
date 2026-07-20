@@ -311,6 +311,18 @@ final class HeadlessBrowser {
                                       doubleValue(message["x"]) ?? -1,
                                       doubleValue(message["y"]) ?? -1])
             }
+        case "dragstart":
+            if let x = doubleValue(message["x"]), let y = doubleValue(message["y"]) {
+                sendMouse("mousePressed", normalizedX: x, normalizedY: y, buttons: 1, clickCount: 1)
+            }
+        case "dragmove":
+            if let x = doubleValue(message["x"]), let y = doubleValue(message["y"]) {
+                sendMouse("mouseMoved", normalizedX: x, normalizedY: y, buttons: 1, clickCount: 0)
+            }
+        case "dragend":
+            if let x = doubleValue(message["x"]), let y = doubleValue(message["y"]) {
+                sendMouse("mouseReleased", normalizedX: x, normalizedY: y, buttons: 0, clickCount: 1)
+            }
         case "key":
             if let key = message["key"] as? String {
                 injectKey(key)
@@ -376,17 +388,22 @@ final class HeadlessBrowser {
     // MARK: - Input
 
     private func injectTap(normalizedX: Double, normalizedY: Double) {
+        sendMouse("mousePressed", normalizedX: normalizedX, normalizedY: normalizedY, buttons: 1, clickCount: 1)
+        sendMouse("mouseReleased", normalizedX: normalizedX, normalizedY: normalizedY, buttons: 0, clickCount: 1)
+    }
+
+    private func sendMouse(_ type: String, normalizedX: Double, normalizedY: Double,
+                           buttons: Int, clickCount: Int) {
         guard let sessionId = activeTab?.sessionId else { return }
-        let x = normalizedX * viewportWidth
-        let y = normalizedY * viewportHeight
-        cdp.send("Input.dispatchMouseEvent", [
-            "type": "mousePressed", "x": x, "y": y,
-            "button": "left", "buttons": 1, "clickCount": 1
-        ], sessionId: sessionId)
-        cdp.send("Input.dispatchMouseEvent", [
-            "type": "mouseReleased", "x": x, "y": y,
-            "button": "left", "buttons": 0, "clickCount": 1
-        ], sessionId: sessionId)
+        var params: [String: Any] = [
+            "type": type,
+            "x": min(max(normalizedX, 0), 1) * viewportWidth,
+            "y": min(max(normalizedY, 0), 1) * viewportHeight,
+            "button": "left",
+            "buttons": buttons
+        ]
+        if clickCount > 0 { params["clickCount"] = clickCount }
+        cdp.send("Input.dispatchMouseEvent", params, sessionId: sessionId)
     }
 
     private func injectKey(_ key: String) {

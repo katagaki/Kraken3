@@ -35,6 +35,13 @@ let controlPageHTML = #"""
     font-family: -apple-system, system-ui, sans-serif;
     overflow: hidden;
     overscroll-behavior: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
+  input, textarea {
+    user-select: text;
+    -webkit-user-select: text;
   }
   #app { display: flex; flex-direction: column; height: 100%; }
 
@@ -190,6 +197,19 @@ let controlPageHTML = #"""
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  #dragHint {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--cds-layer);
+    border-left: 3px solid #42be65;
+    padding: 8px 16px;
+    font-size: 13px;
+    color: var(--cds-text-secondary);
+    display: none;
+    white-space: nowrap;
+  }
 
   #keyboardInput {
     position: fixed;
@@ -331,6 +351,7 @@ let controlPageHTML = #"""
     <img id="screen" alt="">
     <div id="overlay"></div>
     <div id="status"></div>
+    <div id="dragHint">Drag mode</div>
     <div id="disconnected"><span>Reconnecting&hellip;</span></div>
     <div id="pastePanel">
       <div id="pasteSheet">
@@ -372,6 +393,7 @@ let controlPageHTML = #"""
   var overlay = document.getElementById('overlay');
   var urlField = document.getElementById('url');
   var statusEl = document.getElementById('status');
+  var dragHintEl = document.getElementById('dragHint');
   var progressEl = document.getElementById('progress');
   var disconnectedEl = document.getElementById('disconnected');
   var keyboardInput = document.getElementById('keyboardInput');
@@ -548,20 +570,45 @@ let controlPageHTML = #"""
   }
 
   var touch = null;
+  var lastTap = { time: 0, x: 0, y: 0 };
+
+  function cancelTouch() {
+    if (!touch) return;
+    if (touch.dragging) {
+      var point = normalized(touch.lastX, touch.lastY);
+      send({ type: 'dragend', x: point ? point.x : 0.5, y: point ? point.y : 0.5 });
+      dragHintEl.style.display = 'none';
+    }
+    touch = null;
+  }
+
   overlay.addEventListener('touchstart', function (event) {
     event.preventDefault();
     if (event.touches.length === 2) {
-      touch = null;  // a pinch is not a tap
+      cancelTouch();  // a pinch is not a tap or drag
       pinch = { startDist: touchDist(event), startZoom: zoom,
                 startMidX: (event.touches[0].clientX + event.touches[1].clientX) / 2,
                 startMidY: (event.touches[0].clientY + event.touches[1].clientY) / 2,
                 startPanX: panX, startPanY: panY };
       return;
     }
-    if (event.touches.length !== 1) { touch = null; return; }
+    if (event.touches.length !== 1) { cancelTouch(); return; }
     var t = event.touches[0];
-    touch = { startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY,
-              startTime: Date.now(), moved: false };
+    var current = { startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY,
+                    startTime: Date.now(), moved: false, dragging: false, lastDragSend: 0 };
+    touch = current;
+    // A second touch right after a tap starts a click-drag instead of a scroll.
+    var isDoubleTap = (Date.now() - lastTap.time) < 300 &&
+                      Math.abs(t.clientX - lastTap.x) < 30 &&
+                      Math.abs(t.clientY - lastTap.y) < 30;
+    if (isDoubleTap) {
+      var point = normalized(t.clientX, t.clientY);
+      if (point) {
+        current.dragging = true;
+        dragHintEl.style.display = 'block';
+        send({ type: 'dragstart', x: point.x, y: point.y });
+      }
+    }
   }, { passive: false });
 
   overlay.addEventListener('touchmove', function (event) {
@@ -583,6 +630,17 @@ let controlPageHTML = #"""
     var t = event.touches[0];
     var dx = t.clientX - touch.lastX;
     var dy = t.clientY - touch.lastY;
+    if (touch.dragging) {
+      touch.lastX = t.clientX;
+      touch.lastY = t.clientY;
+      var now = Date.now();
+      if (now - touch.lastDragSend > 40) {
+        var dragPoint = normalized(t.clientX, t.clientY);
+        if (dragPoint) send({ type: 'dragmove', x: dragPoint.x, y: dragPoint.y });
+        touch.lastDragSend = now;
+      }
+      return;
+    }
     if (Math.abs(t.clientX - touch.startX) > 8 || Math.abs(t.clientY - touch.startY) > 8) {
       touch.moved = true;
     }
@@ -617,13 +675,25 @@ let controlPageHTML = #"""
       return;
     }
     if (!touch) return;
+    if (touch.dragging) {
+      cancelTouch();
+      return;
+    }
     var wasTap = !touch.moved && (Date.now() - touch.startTime) < 600;
     if (wasTap) {
       var point = normalized(touch.startX, touch.startY);
-      if (point) send({ type: 'tap', x: point.x, y: point.y });
+      if (point) {
+        send({ type: 'tap', x: point.x, y: point.y });
+        lastTap = { time: Date.now(), x: touch.startX, y: touch.startY };
+      }
     }
     touch = null;
   }, { passive: false });
+
+  overlay.addEventListener('touchcancel', function () {
+    cancelTouch();
+    pinch = null;
+  });
 
   overlay.addEventListener('click', function (event) {
     var point = normalized(event.clientX, event.clientY);

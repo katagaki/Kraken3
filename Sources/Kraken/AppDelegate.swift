@@ -238,6 +238,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                              atX: message["x"] as? Double ?? -1,
                              atY: message["y"] as? Double ?? -1)
             }
+        case "dragstart":
+            if let x = message["x"] as? Double, let y = message["y"] as? Double {
+                callHelper("dragStart", [x, y])
+            }
+        case "dragmove":
+            if let x = message["x"] as? Double, let y = message["y"] as? Double {
+                callHelper("dragMove", [x, y])
+            }
+        case "dragend":
+            if let x = message["x"] as? Double, let y = message["y"] as? Double {
+                callHelper("dragEnd", [x, y])
+            }
         case "key":
             if let key = message["key"] as? String {
                 injectKey(key)
