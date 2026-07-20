@@ -758,7 +758,6 @@ let controlPageHTML = #"""
     send({ type: 'dismisserror' });
   });
 
-  // Rounded integer dimensions rarely match exactly; fill to avoid letterbox hairlines.
   var screenFillMode = false;
   function updateFitMode() {
     var box = screenEl.getBoundingClientRect();
@@ -840,7 +839,6 @@ let controlPageHTML = #"""
     var current = { startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY,
                     startTime: Date.now(), moved: false, dragging: false, lastDragSend: 0 };
     touch = current;
-    // A second touch right after a tap starts a click-drag instead of a scroll.
     var isDoubleTap = (Date.now() - lastTap.time) < 300 &&
                       Math.abs(t.clientX - lastTap.x) < 30 &&
                       Math.abs(t.clientY - lastTap.y) < 30;
@@ -896,7 +894,6 @@ let controlPageHTML = #"""
       } else {
         var rect = contentRect();
         if (rect) {
-          // Natural scrolling: finger down moves page up.
           var at = normalized(touch.startX, touch.startY);
           send({ type: 'scroll', dx: -dx / rect.w, dy: -dy / rect.h,
                  x: at ? at.x : -1, y: at ? at.y : -1 });
@@ -1009,7 +1006,6 @@ let controlPageHTML = #"""
   var pasteText = document.getElementById('pasteText');
 
   document.getElementById('btnPaste').addEventListener('click', function () {
-    // Clipboard API needs https; fall back to a paste sheet over plain http.
     if (navigator.clipboard && navigator.clipboard.readText) {
       navigator.clipboard.readText().then(function (value) {
         if (value) send({ type: 'text', value: value });

@@ -30,9 +30,6 @@ enum InputScript {
         return style.visibility !== 'hidden' && style.display !== 'none';
       }
 
-      // Native popups for these controls (dropdown, date/color pickers, datalist)
-      // render in an OS layer the screencast never captures, so describe the
-      // control to the client and let it show its own picker instead.
       function pickerInfo(el) {
         if (!el || el.disabled || el.readOnly || !isVisible(el)) return null;
         if (el.tagName === 'SELECT') {
@@ -72,8 +69,6 @@ enum InputScript {
         return true;
       }
 
-      // Taps arrive as trusted CDP mouse events; catch them here before the
-      // native popup would open and hand the control off to the client.
       document.addEventListener('mousedown', function (event) {
         var node = event.target;
         while (node && node.nodeType === 1 && node !== document.body) {
@@ -169,8 +164,6 @@ enum InputScript {
             if (!el.dispatchEvent(ev)) prevented = true;
           });
           drag = { el: el, anchor: null };
-          // Synthetic events cannot drive native text selection, so build it
-          // from caret positions unless the page handles the drag itself.
           if (!prevented && !isEditable(el)) {
             drag.anchor = caretAt(x, y);
           }

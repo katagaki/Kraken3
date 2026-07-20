@@ -13,8 +13,6 @@ final class BrowserSession {
         var navError: [String: String]?
         var mainFrameId: String?
         var lastGoodURL: String?
-        // True from the moment we start auto-navigating away from a committed
-        // Chromium error page until any navigation commits.
         var escaping = false
 
         var hideFrames: Bool { navError != nil || escaping }
@@ -37,9 +35,6 @@ final class BrowserSession {
     private var activeTabID: String?
     private var discoveryStarted = false
 
-    // Cross-origin iframes run in their own attached targets; map each frame
-    // session back to the page session that owns it so picker events can be
-    // matched to the active tab and answered in the right frame.
     private var frameOwner: [String: String] = [:]
     private var pickerSession: String?
 
@@ -161,11 +156,7 @@ final class BrowserSession {
         broadcastState()
     }
 
-    // Installs the picker script + binding into a target and auto-attaches its
-    // cross-origin subframes so the same hooks reach every frame.
     private func installPickerHooks(sessionId: String) {
-        // Pause every document request (navigations, redirect hops, iframe
-        // loads) so in-page navigations get the same filtering as the URL bar.
         cdp.send("Fetch.enable", [
             "patterns": [["urlPattern": "*", "resourceType": "Document", "requestStage": "Request"]]
         ], sessionId: sessionId)
@@ -295,23 +286,15 @@ final class BrowserSession {
             }
 
         case "Page.frameNavigated":
-            // A main-frame navigation that Chromium could not complete (bad DNS,
-            // refused connection, cert interstitial, …) commits an error page
-            // with unreachableUrl set. Surface it to the client and immediately
-            // leave the error page so it is never streamed or interacted with.
             guard let tab = tabs.first(where: { $0.sessionId == sessionId }),
                   let frame = params["frame"] as? [String: Any],
                   frame["parentId"] == nil else { return }
             tab.mainFrameId = frame["id"] as? String ?? tab.mainFrameId
             fputs("KDBG frameNavigated url=\(frame["url"] as? String ?? "") unreachable=\(frame["unreachableUrl"] as? String ?? "-") escaping=\(tab.escaping) navError=\(tab.navError?["url"] ?? "-")\n", stderr)
             if let unreachable = frame["unreachableUrl"] as? String, !unreachable.isEmpty {
-                // Keep an existing error (it may carry a precise code from the
-                // Page.navigate response or the fetch guard for the same load).
                 if tab.navError == nil {
                     tab.navError = ["url": unreachable, "code": ""]
                 }
-                // Also reached when the escape target itself failed; resetting
-                // lets the next escape walk further back in history.
                 tab.escaping = false
                 escapeErrorPage(tab, failedURL: unreachable)
             } else if tab.escaping {
@@ -325,8 +308,6 @@ final class BrowserSession {
             guard let sessionId, let requestId = params["requestId"] as? String else { return }
             let urlString = (params["request"] as? [String: Any])?["url"] as? String ?? ""
             let frameId = params["frameId"] as? String
-            // Resolve the owning tab so a blocked main-frame document can raise
-            // the error overlay; iframe documents are failed silently.
             let rootSession = frameOwner[sessionId] ?? sessionId
             let tab = tabs.first { $0.sessionId == rootSession }
             guard let url = URL(string: urlString) else {
@@ -344,8 +325,6 @@ final class BrowserSession {
                         self.cdp.send("Fetch.continueRequest", ["requestId": requestId],
                                       sessionId: sessionId)
                     case .unresolvable:
-                        // Chromium will fail this itself; pre-record the precise
-                        // code so the overlay can name the DNS failure.
                         if isMainFrame, let tab {
                             self.setNavError(tab, url: urlString, code: "ERR_NAME_NOT_RESOLVED")
                         }
@@ -366,8 +345,6 @@ final class BrowserSession {
             guard let childSession = params["sessionId"] as? String,
                   let info = params["targetInfo"] as? [String: Any],
                   (info["type"] as? String) == "iframe" else { return }
-            // The event arrives on the owning (parent) session; resolve it to
-            // the root page so picker events can be traced back to a tab.
             let root = sessionId.flatMap { frameOwner[$0] } ?? sessionId
             frameOwner[childSession] = root
             cdp.send("Page.enable", sessionId: childSession)
@@ -473,8 +450,6 @@ final class BrowserSession {
         case "pickresult":
             var payload = message
             payload.removeValue(forKey: "type")
-            // Apply the choice in the frame that opened the picker, which may be
-            // a cross-origin iframe rather than the tab's main frame.
             let target = pickerSession ?? activeTab?.sessionId
             pickerSession = nil
             if let target {
@@ -551,8 +526,6 @@ final class BrowserSession {
         cdp.send("Page.navigate", ["url": url.absoluteString], sessionId: sessionId) { [weak self] result in
             guard let self,
                   let errorText = result["errorText"] as? String, !errorText.isEmpty,
-                  // ERR_ABORTED is not a failure the user should see: it fires
-                  // when a navigation turns into a download or is superseded.
                   errorText != "net::ERR_ABORTED" else { return }
             let code = errorText.hasPrefix("net::") ? String(errorText.dropFirst(5)) : errorText
             self.setNavError(tab, url: url.absoluteString, code: code)
@@ -564,19 +537,11 @@ final class BrowserSession {
         broadcastState()
     }
 
-    // Chromium has committed an error page (net error or interstitial). Return
-    // to the last good history entry — or a blank page — so the error page is
-    // never shown; the overlay reports the failure instead.
     private func escapeErrorPage(_ tab: HeadlessTab, failedURL: String) {
         guard let sessionId = tab.sessionId, !tab.escaping else { return }
         tab.escaping = true
         cdp.send("Page.getNavigationHistory", sessionId: sessionId) { [weak self] result in
             guard let self else { return }
-            // Committed net-error pages own a history entry (whose URL is the
-            // error page's document URL, e.g. a redirect target rather than
-            // what the user typed); cert interstitials own none, leaving the
-            // last good page current. Walk back past any entry for the failed
-            // document URL and re-commit the nearest good entry.
             if let index = result["currentIndex"] as? Int,
                let entries = result["entries"] as? [[String: Any]] {
                 fputs("KDBG escape failed=\(failedURL) index=\(index) entries=\(entries.map { $0["url"] as? String ?? "?" })\n", stderr)
@@ -683,8 +648,6 @@ final class BrowserSession {
                  sessionId: sessionId)
     }
 
-    // A binding call belongs to the active tab when it comes from the tab's own
-    // session or from one of its attached iframe sessions.
     private func isActiveTabSession(_ session: String) -> Bool {
         guard let active = activeTab?.sessionId else { return false }
         return session == active || frameOwner[session] == active
