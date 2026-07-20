@@ -2,7 +2,7 @@
 
 A remote-controlled browser that can be accessed from mobile devices via the local network or Tailscale.
 
-## Runing
+## Running
 
 The container drives headless Chromium over the DevTools protocol and serves a phone control page.
 
@@ -10,17 +10,7 @@ The container drives headless Chromium over the DevTools protocol and serves a p
 docker compose up -d --build
 ```
 
-Compose uses **host networking** so the client IP allowlist can see real peer
-addresses (see [Access & sessions](#access--sessions)). To run by hand instead:
-
-```sh
-docker build -t kraken .
-docker run -d --name kraken --network host \
-  -v "$PWD/Sessions:/data/sessions" \
-  kraken
-```
-
-Environment variables:
+## Environment variables
 
 - `KRAKEN_HOMEPAGE`: homepage for new tabs (default `https://www.startpage.com`)
 - `KRAKEN_HTTP_PORT`: listen port for the UI and control WebSocket (default `8080`)
@@ -56,7 +46,7 @@ view over a WebSocket on the same origin (`/ws`).
 - **Tab bar**: scrollable tabs; tap to switch, ✕ to close, + for a new tab. Popups
   open as new tabs.
 - **Live view**: tap to click, drag to scroll, pinch to zoom.
-- **URL bar**: address or search terms.
-- **Paste / Keyboard**: send clipboard text, or forward iPhone keystrokes, into the
+- **Address bar**: address or search terms.
+- **Paste/Keyboard**: send clipboard text, or forward iPhone keystrokes, into the
   focused field.
 - **Downloads**: progress bars; save a finished file to the phone or delete it.
