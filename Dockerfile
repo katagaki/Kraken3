@@ -4,7 +4,7 @@ COPY Package.swift ./
 COPY Sources ./Sources
 RUN swift build -c release --static-swift-stdlib
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-20260713-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         chromium ca-certificates \
         fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
