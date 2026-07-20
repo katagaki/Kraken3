@@ -10,14 +10,21 @@ final class HeadlessDownloads {
         var failed = false
     }
 
+    private let directory: URL
+
     private var active: [Item] = []
     private var lastBroadcast = Date.distantPast
 
     var onChange: (() -> Void)?
 
+    init(directory: URL) {
+        self.directory = directory
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
     func handleWillBegin(guid: String, suggestedFilename: String) {
-        Paths.ensureDownloadsDirectory()
-        let base = suggestedFilename.isEmpty ? "download" : suggestedFilename
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let base = Filenames.sanitize(suggestedFilename)
         active.append(Item(guid: guid, name: availableName(for: base)))
         notifyChange()
     }
@@ -27,9 +34,8 @@ final class HeadlessDownloads {
         switch state {
         case "completed":
             let item = active.remove(at: index)
-            // With allowAndName, Chromium writes the file under its GUID.
-            let partial = Paths.downloadsDirectory.appendingPathComponent(item.guid)
-            let final = Paths.downloadsDirectory.appendingPathComponent(item.name)
+            let partial = directory.appendingPathComponent(item.guid)
+            let final = directory.appendingPathComponent(item.name)
             try? FileManager.default.moveItem(at: partial, to: final)
             notifyChange()
         case "canceled":
@@ -62,7 +68,7 @@ final class HeadlessDownloads {
         let activeGuids = Set(active.map(\.guid))
         let activeNames = Set(active.map(\.name))
         let fm = FileManager.default
-        let files = (try? fm.contentsOfDirectory(at: Paths.downloadsDirectory,
+        let files = (try? fm.contentsOfDirectory(at: directory,
                                                  includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
                                                  options: [.skipsHiddenFiles])) ?? []
         let completed = files
@@ -83,7 +89,7 @@ final class HeadlessDownloads {
 
     func deleteFile(named name: String) -> Bool {
         guard !name.contains("/"), !name.contains(".."), !name.isEmpty else { return false }
-        let url = Paths.downloadsDirectory.appendingPathComponent(name)
+        let url = directory.appendingPathComponent(name)
         let ok = (try? FileManager.default.removeItem(at: url)) != nil
         if ok { notifyChange() }
         return ok
@@ -91,7 +97,7 @@ final class HeadlessDownloads {
 
     func fileURL(named name: String) -> URL? {
         guard !name.contains("/"), !name.contains(".."), !name.isEmpty else { return nil }
-        let url = Paths.downloadsDirectory.appendingPathComponent(name)
+        let url = directory.appendingPathComponent(name)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return url
     }
@@ -102,7 +108,7 @@ final class HeadlessDownloads {
         var candidate = base
         var counter = 1
         while activeNames.contains(candidate)
-            || fm.fileExists(atPath: Paths.downloadsDirectory.appendingPathComponent(candidate).path) {
+            || fm.fileExists(atPath: directory.appendingPathComponent(candidate).path) {
             let ext = (base as NSString).pathExtension
             let stem = (base as NSString).deletingPathExtension
             candidate = ext.isEmpty ? "\(stem) (\(counter))" : "\(stem) (\(counter)).\(ext)"

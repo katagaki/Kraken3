@@ -387,7 +387,7 @@ let controlPageHTML = #"""
 (function () {
   'use strict';
 
-  var wsURL = 'ws://' + location.hostname + ':8081/';
+  var wsURL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
   var ws = null;
   var screenEl = document.getElementById('screen');
   var overlay = document.getElementById('overlay');

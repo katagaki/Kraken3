@@ -5,88 +5,130 @@ import Glibc
 import Darwin
 #endif
 
+struct HTTPRequest {
+    let method: String
+    let path: String
+    let headers: [String: String]
+    let peerIP: String
+
+    var cookies: [String: String] {
+        HTTPCookies.parse(headers["cookie"] ?? "")
+    }
+
+    var isWebSocketUpgrade: Bool {
+        headers["upgrade"]?.lowercased().contains("websocket") == true
+    }
+}
+
+struct HTTPResponse {
+    var status: String
+    var body: Data
+    var contentType: String
+    var extraHeaders: [String: String] = [:]
+    var setCookies: [String] = []
+
+    static func text(_ status: String, _ message: String) -> HTTPResponse {
+        HTTPResponse(status: status, body: Data(message.utf8), contentType: "text/plain")
+    }
+}
+
+enum HTTPCookies {
+    static func parse(_ header: String) -> [String: String] {
+        var result: [String: String] = [:]
+        for pair in header.split(separator: ";") {
+            let trimmed = pair.trimmingCharacters(in: .whitespaces)
+            guard let eq = trimmed.firstIndex(of: "=") else { continue }
+            let name = String(trimmed[..<eq])
+            let value = String(trimmed[trimmed.index(after: eq)...])
+            if !name.isEmpty { result[name] = value }
+        }
+        return result
+    }
+}
+
 final class HeadlessHTTPServer {
 
-    var entriesProvider: (() -> [DownloadEntry])?
-    var fileURLProvider: ((String) -> URL?)?
-    var deleteHandler: ((String) -> Bool)?
+    var accessControl: ((String) -> Bool)?
+    var handler: ((HTTPRequest) -> HTTPResponse)?
+    var webSocketUpgrade: ((Int32, HTTPRequest) -> Void)?
 
     private var listener: TCPListener?
 
     func start(port: UInt16) throws {
         let listener = try TCPListener(port: port)
-        listener.startAccepting { [weak self] fd in
+        listener.startAccepting { [weak self] fd, peerIP in
+            let server = self
             Thread.detachNewThread {
-                self?.handle(fd)
+                server?.handle(fd, peerIP: peerIP)
                 close(fd)
             }
         }
         self.listener = listener
     }
 
-    private func handle(_ fd: Int32) {
+    private func handle(_ fd: Int32, peerIP: String) {
+        if let accessControl, !accessControl(peerIP) {
+            respond(fd, HTTPResponse.text("403 Forbidden", "forbidden"))
+            return
+        }
+
         var buffer = Data()
         while buffer.range(of: Data("\r\n\r\n".utf8)) == nil {
             guard buffer.count < 1_000_000, let chunk = SocketIO.readSome(fd) else { return }
             buffer.append(chunk)
         }
-        guard let head = String(data: buffer, encoding: .utf8)?
-                .components(separatedBy: "\r\n").first,
-              case let parts = head.components(separatedBy: " "),
-              parts.count >= 2 else {
-            respond(fd, status: "400 Bad Request", body: Data("bad request".utf8), contentType: "text/plain")
+        guard let request = parse(buffer, peerIP: peerIP) else {
+            respond(fd, HTTPResponse.text("400 Bad Request", "bad request"))
             return
         }
+
+        if request.isWebSocketUpgrade, let webSocketUpgrade {
+            webSocketUpgrade(fd, request)
+            return
+        }
+
+        let response = handler?(request) ?? HTTPResponse.text("404 Not Found", "not found")
+        respond(fd, response)
+    }
+
+    private func parse(_ buffer: Data, peerIP: String) -> HTTPRequest? {
+        guard let text = String(data: buffer, encoding: .utf8) else { return nil }
+        let lines = text.components(separatedBy: "\r\n")
+        guard let requestLine = lines.first else { return nil }
+        let parts = requestLine.components(separatedBy: " ")
+        guard parts.count >= 2 else { return nil }
+
         let method = parts[0]
         let rawPath = parts[1].components(separatedBy: "?").first ?? "/"
         let path = rawPath.removingPercentEncoding ?? rawPath
 
-        switch (method, path) {
-        case ("GET", "/"), ("GET", "/index.html"):
-            respond(fd, status: "200 OK", body: Data(controlPageHTML.utf8),
-                    contentType: "text/html; charset=utf-8")
-
-        case ("GET", "/files"):
-            let entries = DispatchQueue.main.sync { entriesProvider?() ?? [] }
-            let body = (try? JSONEncoder().encode(entries)) ?? Data("[]".utf8)
-            respond(fd, status: "200 OK", body: body, contentType: "application/json")
-
-        case ("GET", let p) where p.hasPrefix("/files/"):
-            let name = String(p.dropFirst("/files/".count))
-            let url = DispatchQueue.main.sync { fileURLProvider?(name) }
-            if let url, let body = try? Data(contentsOf: url) {
-                respond(fd, status: "200 OK", body: body,
-                        contentType: "application/octet-stream",
-                        extraHeaders: ["Content-Disposition": "attachment; filename=\"\(name.replacingOccurrences(of: "\"", with: "_"))\""])
-            } else {
-                respond(fd, status: "404 Not Found", body: Data("not found".utf8), contentType: "text/plain")
-            }
-
-        case ("DELETE", let p) where p.hasPrefix("/files/"):
-            let name = String(p.dropFirst("/files/".count))
-            let ok = DispatchQueue.main.sync { deleteHandler?(name) ?? false }
-            respond(fd, status: ok ? "200 OK" : "404 Not Found",
-                    body: Data(ok ? "deleted".utf8 : "not found".utf8), contentType: "text/plain")
-
-        default:
-            respond(fd, status: "404 Not Found", body: Data("not found".utf8), contentType: "text/plain")
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            if line.isEmpty { break }
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            headers[name] = value
         }
+        return HTTPRequest(method: method, path: path, headers: headers, peerIP: peerIP)
     }
 
-    private func respond(_ fd: Int32, status: String, body: Data,
-                         contentType: String, extraHeaders: [String: String] = [:]) {
+    private func respond(_ fd: Int32, _ response: HTTPResponse) {
         var headers = [
-            "HTTP/1.1 \(status)",
-            "Content-Type: \(contentType)",
-            "Content-Length: \(body.count)",
+            "HTTP/1.1 \(response.status)",
+            "Content-Type: \(response.contentType)",
+            "Content-Length: \(response.body.count)",
             "Cache-Control: no-store",
             "Connection: close"
         ]
-        for (key, value) in extraHeaders {
+        for (key, value) in response.extraHeaders {
             headers.append("\(key): \(value)")
         }
-        var response = Data((headers.joined(separator: "\r\n") + "\r\n\r\n").utf8)
-        response.append(body)
-        _ = SocketIO.writeAll(fd, response)
+        for cookie in response.setCookies {
+            headers.append("Set-Cookie: \(cookie)")
+        }
+        var data = Data((headers.joined(separator: "\r\n") + "\r\n\r\n").utf8)
+        data.append(response.body)
+        _ = SocketIO.writeAll(fd, data)
     }
 }

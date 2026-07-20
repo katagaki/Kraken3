@@ -4,22 +4,6 @@ import Glibc
 #endif
 
 enum Paths {
-    static let projectRoot: URL = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-
-    static let downloadsDirectory: URL = {
-        if let override = ProcessInfo.processInfo.environment["KRAKEN_DOWNLOADS"], !override.isEmpty {
-            return URL(fileURLWithPath: override, isDirectory: true)
-        }
-        return projectRoot.appendingPathComponent("Downloads", isDirectory: true)
-    }()
-
-    static func ensureDownloadsDirectory() {
-        try? FileManager.default.createDirectory(at: downloadsDirectory, withIntermediateDirectories: true)
-    }
-
     static func localIPv4Addresses() -> [String] {
         var addresses: [String] = []
         var ifaddr: UnsafeMutablePointer<ifaddrs>?

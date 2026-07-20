@@ -1,4 +1,4 @@
-FROM swift:6.3-bookworm AS build
+FROM swift:6.3.3-bookworm AS build
 WORKDIR /app
 COPY Package.swift ./
 COPY Sources ./Sources
@@ -10,8 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/.build/release/Kraken /usr/local/bin/kraken
-RUN useradd --create-home kraken && mkdir /downloads && chown kraken /downloads
+COPY --from=build /app/.build/release/KrakenReaper /usr/local/bin/kraken-reaper
+RUN useradd --create-home kraken && mkdir -p /data/sessions && chown -R kraken /data
 USER kraken
-ENV KRAKEN_DOWNLOADS=/downloads
-EXPOSE 8080 8081
+EXPOSE 8080
 CMD ["kraken"]

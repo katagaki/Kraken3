@@ -9,54 +9,37 @@ final class HeadlessWebSocketServer {
 
     private final class Client {
         let fd: Int32
+        let sessionID: String
         let writeLock = NSLock()
-        init(fd: Int32) { self.fd = fd }
+        init(fd: Int32, sessionID: String) {
+            self.fd = fd
+            self.sessionID = sessionID
+        }
     }
 
-    var onMessage: (([String: Any]) -> Void)?
-    var onClientConnected: (() -> Void)?
+    var onMessage: ((String, [String: Any]) -> Void)?
+    var onClientConnected: ((String) -> Void)?
 
-    private var listener: TCPListener?
     private var clients: [Client] = []
     private let clientsLock = NSLock()
     private let sendQueue = DispatchQueue(label: "kraken.ws.send")
 
-    var clientCount: Int {
-        clientsLock.lock()
-        defer { clientsLock.unlock() }
-        return clients.count
-    }
+    func accept(fd: Int32, key: String, sessionID: String) {
+        let magic = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        let acceptKey = SHA1.digest(Data(magic.utf8)).base64EncodedString()
+        let response = [
+            "HTTP/1.1 101 Switching Protocols",
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            "Sec-WebSocket-Accept: \(acceptKey)"
+        ].joined(separator: "\r\n") + "\r\n\r\n"
+        guard SocketIO.writeAll(fd, Data(response.utf8)) else { return }
 
-    func start(port: UInt16) throws {
-        let listener = try TCPListener(port: port)
-        listener.startAccepting { [weak self] fd in
-            Thread.detachNewThread {
-                self?.serve(fd)
-                close(fd)
-            }
-        }
-        self.listener = listener
-    }
-
-    func broadcastFrame(_ data: Data) {
-        broadcast(opcode: 0x2, payload: data)
-    }
-
-    func broadcastJSON(_ object: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
-        broadcast(opcode: 0x1, payload: data)
-    }
-
-    // MARK: - Connection lifecycle
-
-    private func serve(_ fd: Int32) {
-        guard performHandshake(fd) else { return }
-
-        let client = Client(fd: fd)
+        let client = Client(fd: fd, sessionID: sessionID)
         clientsLock.lock()
         clients.append(client)
         clientsLock.unlock()
-        DispatchQueue.main.async { self.onClientConnected?() }
+        onClientConnected?(sessionID)
 
         readFrames(client)
 
@@ -65,36 +48,29 @@ final class HeadlessWebSocketServer {
         clientsLock.unlock()
     }
 
-    private func performHandshake(_ fd: Int32) -> Bool {
-        var buffer = Data()
-        while buffer.range(of: Data("\r\n\r\n".utf8)) == nil {
-            guard buffer.count < 65536, let chunk = SocketIO.readSome(fd) else { return false }
-            buffer.append(chunk)
-        }
-        guard let request = String(data: buffer, encoding: .utf8) else { return false }
-
-        var websocketKey: String?
-        for line in request.components(separatedBy: "\r\n") {
-            let lowered = line.lowercased()
-            if lowered.hasPrefix("sec-websocket-key:") {
-                websocketKey = line.dropFirst("sec-websocket-key:".count)
-                    .trimmingCharacters(in: .whitespaces)
-            }
-        }
-        guard let websocketKey else { return false }
-
-        let magic = websocketKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-        let accept = SHA1.digest(Data(magic.utf8)).base64EncodedString()
-        let response = [
-            "HTTP/1.1 101 Switching Protocols",
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            "Sec-WebSocket-Accept: \(accept)"
-        ].joined(separator: "\r\n") + "\r\n\r\n"
-        return SocketIO.writeAll(fd, Data(response.utf8))
+    func sendFrame(toSession sessionID: String, _ data: Data) {
+        broadcast(toSession: sessionID, opcode: 0x2, payload: data)
     }
 
-    // MARK: - Frame reading
+    func sendJSON(toSession sessionID: String, _ object: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        broadcast(toSession: sessionID, opcode: 0x1, payload: data)
+    }
+
+    func closeSession(_ sessionID: String) {
+        clientsLock.lock()
+        let doomed = clients.filter { $0.sessionID == sessionID }
+        clientsLock.unlock()
+        for client in doomed {
+            shutdown(client.fd, 2)
+        }
+    }
+
+    func sessionsWithClients() -> Set<String> {
+        clientsLock.lock()
+        defer { clientsLock.unlock() }
+        return Set(clients.map(\.sessionID))
+    }
 
     private func readFrames(_ client: Client) {
         var pending = Data()
@@ -159,14 +135,13 @@ final class HeadlessWebSocketServer {
             if fin {
                 if messageOpcode == 0x1,
                    let json = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any] {
-                    DispatchQueue.main.async { self.onMessage?(json) }
+                    let sessionID = client.sessionID
+                    DispatchQueue.main.async { self.onMessage?(sessionID, json) }
                 }
                 messageData = Data()
             }
         }
     }
-
-    // MARK: - Sending
 
     private func frame(opcode: UInt8, payload: Data) -> Data {
         var data = Data([0x80 | opcode])
@@ -194,11 +169,11 @@ final class HeadlessWebSocketServer {
         client.writeLock.unlock()
     }
 
-    private func broadcast(opcode: UInt8, payload: Data) {
+    private func broadcast(toSession sessionID: String, opcode: UInt8, payload: Data) {
         sendQueue.async { [weak self] in
             guard let self else { return }
             self.clientsLock.lock()
-            let snapshot = self.clients
+            let snapshot = self.clients.filter { $0.sessionID == sessionID }
             self.clientsLock.unlock()
             let data = self.frame(opcode: opcode, payload: payload)
             for client in snapshot {
@@ -206,7 +181,7 @@ final class HeadlessWebSocketServer {
                 let ok = SocketIO.writeAll(client.fd, data)
                 client.writeLock.unlock()
                 if !ok {
-                    shutdown(client.fd, 2)  // SHUT_RDWR; the constant's type differs across libcs
+                    shutdown(client.fd, 2)
                 }
             }
         }

@@ -1,9 +1,9 @@
 services:
   kraken:
     build: .
-    ports:
-      - "8080:8080"
-      - "8081:8081"
+    network_mode: host
     volumes:
-      - ./Downloads:/downloads
+      - ./Sessions:/data/sessions
+    environment:
+      - KRAKEN_SINGLE_USER=0
     restart: unless-stopped

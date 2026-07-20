@@ -1,6 +1,6 @@
 import Foundation
 
-final class HeadlessBrowser {
+final class BrowserSession {
 
     private final class HeadlessTab {
         let targetId: String
@@ -15,10 +15,13 @@ final class HeadlessBrowser {
     }
 
     private let cdp: CDPConnection
-    private let httpServer = HeadlessHTTPServer()
-    private let socketServer = HeadlessWebSocketServer()
-    private let downloads = HeadlessDownloads()
+    private let downloads: HeadlessDownloads
     private let homepage: String
+
+    var onState: (([String: Any]) -> Void)?
+    var onDownloads: (([String: Any]) -> Void)?
+    var onFrame: ((Data) -> Void)?
+    var onProcessExit: (() -> Void)?
 
     private var tabs: [HeadlessTab] = []
     private var activeTabID: String?
@@ -32,18 +35,17 @@ final class HeadlessBrowser {
     private static let desktopUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     private static let mobileUserAgent = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
 
-    // Judge by the smaller dimension so rotating a phone to landscape doesn't
-    // flip the user agent to desktop and force a reload of every tab.
     private var isMobileViewport: Bool { min(viewportWidth, viewportHeight) <= 700 }
     private var currentUserAgent: String { isMobileViewport ? Self.mobileUserAgent : Self.desktopUserAgent }
     private var snapshotScale: Double { min(max(devicePixelRatio, 1), 2) }
     private var activeTab: HeadlessTab? { tabs.first { $0.targetId == activeTabID } }
 
-    init(chromiumPath: String, homepage: String, httpPort: UInt16, wsPort: UInt16) throws {
-        self.homepage = homepage
+    var processID: pid_t { cdp.processID }
 
-        let profile = FileManager.default.temporaryDirectory
-            .appendingPathComponent("kraken-chromium").path
+    init(chromiumPath: String, homepage: String, profileDir: URL, downloadsDir: URL) throws {
+        self.homepage = homepage
+        self.downloads = HeadlessDownloads(directory: downloadsDir)
+
         cdp = try CDPConnection(chromiumPath: chromiumPath, arguments: [
             "--headless",
             "--remote-debugging-pipe",
@@ -55,7 +57,7 @@ final class HeadlessBrowser {
             "--disable-crash-reporter",
             "--hide-scrollbars",
             "--mute-audio",
-            "--user-data-dir=\(profile)",
+            "--user-data-dir=\(profileDir.path)",
             "--window-size=1280,800",
             "about:blank"
         ])
@@ -63,33 +65,16 @@ final class HeadlessBrowser {
         cdp.onEvent = { [weak self] method, params, sessionId in
             self?.handleEvent(method, params, sessionId)
         }
-        cdp.onExit = { status in
-            fputs("Kraken: Chromium exited (status \(status)), shutting down\n", stderr)
-            exit(1)
+        cdp.onExit = { [weak self] status in
+            fputs("Kraken: a session's Chromium exited (status \(status))\n", stderr)
+            self?.onProcessExit?()
         }
 
         downloads.onChange = { [weak self] in self?.broadcastDownloads() }
 
-        httpServer.entriesProvider = { [weak self] in self?.downloads.entries() ?? [] }
-        httpServer.fileURLProvider = { [weak self] name in self?.downloads.fileURL(named: name) }
-        httpServer.deleteHandler = { [weak self] name in self?.downloads.deleteFile(named: name) ?? false }
-
-        socketServer.onMessage = { [weak self] message in self?.handleControlMessage(message) }
-        socketServer.onClientConnected = { [weak self] in
-            guard let self else { return }
-            self.broadcastState()
-            self.broadcastDownloads()
-            if let frame = self.lastFrame {
-                self.socketServer.broadcastFrame(frame)
-            }
-        }
-
-        try httpServer.start(port: httpPort)
-        try socketServer.start(port: wsPort)
-
         cdp.send("Browser.setDownloadBehavior", [
             "behavior": "allowAndName",
-            "downloadPath": Paths.downloadsDirectory.path,
+            "downloadPath": downloadsDir.path,
             "eventsEnabled": true
         ])
         cdp.send("Target.getTargets") { [weak self] result in
@@ -106,7 +91,19 @@ final class HeadlessBrowser {
         }
     }
 
-    // MARK: - Tabs
+    func syncNewClient() {
+        broadcastState()
+        broadcastDownloads()
+        if let frame = lastFrame { onFrame?(frame) }
+    }
+
+    func shutdown() {
+        cdp.terminate()
+    }
+
+    func entries() -> [DownloadEntry] { downloads.entries() }
+    func fileURL(named name: String) -> URL? { downloads.fileURL(named: name) }
+    func deleteFile(named name: String) -> Bool { downloads.deleteFile(named: name) }
 
     private func newTab() {
         guard let url = Navigation.destinationURL(for: homepage) else { return }
@@ -156,8 +153,6 @@ final class HeadlessBrowser {
         broadcastState()
     }
 
-    // MARK: - Session configuration
-
     private func configureSession(_ tab: HeadlessTab, reload: Bool) {
         guard let sessionId = tab.sessionId else { return }
         cdp.send("Emulation.setDeviceMetricsOverride", [
@@ -183,8 +178,6 @@ final class HeadlessBrowser {
             "everyNthFrame": 1
         ], sessionId: sessionId)
     }
-
-    // MARK: - CDP events
 
     private func handleEvent(_ method: String, _ params: [String: Any], _ sessionId: String?) {
         switch method {
@@ -229,7 +222,7 @@ final class HeadlessBrowser {
                   let jpeg = Data(base64Encoded: base64),
                   jpeg != lastFrame else { return }
             lastFrame = jpeg
-            socketServer.broadcastFrame(jpeg)
+            onFrame?(jpeg)
 
         case "Page.frameStartedLoading":
             guard let tab = tabs.first(where: { $0.sessionId == sessionId }) else { return }
@@ -266,8 +259,6 @@ final class HeadlessBrowser {
         }
     }
 
-    // MARK: - State broadcasts
-
     private func broadcastState() {
         let active = activeTab
         let tabList: [[String: Any]] = tabs.map { tab in
@@ -276,7 +267,7 @@ final class HeadlessBrowser {
              "url": tab.url,
              "active": tab.targetId == activeTabID]
         }
-        socketServer.broadcastJSON([
+        onState?([
             "type": "state",
             "url": active?.url ?? "",
             "title": active?.title ?? "",
@@ -293,12 +284,10 @@ final class HeadlessBrowser {
             ["id": $0.id, "name": $0.name, "size": $0.size, "received": $0.received,
              "progress": $0.progress, "done": $0.done, "failed": $0.failed]
         }
-        socketServer.broadcastJSON(["type": "downloads", "items": items])
+        onDownloads?(["type": "downloads", "items": items])
     }
 
-    // MARK: - Control messages
-
-    private func handleControlMessage(_ message: [String: Any]) {
+    func handleControlMessage(_ message: [String: Any]) {
         switch message["type"] as? String {
         case "tap":
             if let x = doubleValue(message["x"]), let y = doubleValue(message["y"]) {
@@ -337,10 +326,13 @@ final class HeadlessBrowser {
                               devicePixelRatio: doubleValue(message["dpr"]) ?? 1)
             }
         case "navigate":
-            if let raw = message["url"] as? String,
-               let url = Navigation.destinationURL(for: raw),
-               let sessionId = activeTab?.sessionId {
-                cdp.send("Page.navigate", ["url": url.absoluteString], sessionId: sessionId)
+            if let raw = message["url"] as? String, let sessionId = activeTab?.sessionId {
+                URLFilter.resolveSafe(raw) { [weak self] url in
+                    guard let self, let url else { return }
+                    DispatchQueue.main.async {
+                        self.cdp.send("Page.navigate", ["url": url.absoluteString], sessionId: sessionId)
+                    }
+                }
             }
         case "newtab":
             newTab()
@@ -384,8 +376,6 @@ final class HeadlessBrowser {
             startScreencast(tab)
         }
     }
-
-    // MARK: - Input
 
     private func injectTap(normalizedX: Double, normalizedY: Double) {
         sendMouse("mousePressed", normalizedX: normalizedX, normalizedY: normalizedY, buttons: 1, clickCount: 1)

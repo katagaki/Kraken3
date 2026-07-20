@@ -40,11 +40,17 @@ final class TCPListener {
         }
     }
 
-    func startAccepting(_ handler: @escaping (Int32) -> Void) {
+    func startAccepting(_ handler: @escaping (Int32, String) -> Void) {
         let serverFD = fd
         Thread.detachNewThread {
             while true {
-                let clientFD = accept(serverFD, nil, nil)
+                var storage = sockaddr_storage()
+                var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+                let clientFD = withUnsafeMutablePointer(to: &storage) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        accept(serverFD, $0, &length)
+                    }
+                }
                 if clientFD < 0 {
                     if errno == EINTR { continue }
                     break
@@ -52,9 +58,19 @@ final class TCPListener {
                 var yes: Int32 = 1
                 setsockopt(clientFD, numericCast(IPPROTO_TCP), TCP_NODELAY,
                            &yes, socklen_t(MemoryLayout<Int32>.size))
-                handler(clientFD)
+                handler(clientFD, Self.peerIP(&storage, length))
             }
         }
+    }
+
+    private static func peerIP(_ storage: inout sockaddr_storage, _ length: socklen_t) -> String {
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let result = withUnsafePointer(to: &storage) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getnameinfo($0, length, &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+            }
+        }
+        return result == 0 ? String(cString: host) : ""
     }
 }
 

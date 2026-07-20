@@ -1,10 +1,10 @@
+# Session data (per-session browser profiles + downloads)
+Sessions/
+
 # Swift Package Manager
 .build/
 .swiftpm/
 Package.resolved
-
-# Downloaded files (runtime content, not source)
-Downloads/
 
 # Xcode
 *.xcodeproj/

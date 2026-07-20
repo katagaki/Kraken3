@@ -3,13 +3,14 @@ import PackageDescription
 
 let package = Package(
     name: "Kraken",
-    platforms: [
-        .macOS(.v13)
-    ],
     targets: [
         .executableTarget(
             name: "Kraken",
             path: "Sources/Kraken"
+        ),
+        .executableTarget(
+            name: "KrakenReaper",
+            path: "Sources/KrakenReaper"
         )
     ]
 )

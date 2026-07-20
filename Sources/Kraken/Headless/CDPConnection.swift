@@ -14,6 +14,12 @@ final class CDPConnection {
     private let responseFD: Int32
     private let pid: pid_t
 
+    var processID: pid_t { pid }
+
+    func terminate() {
+        kill(pid, SIGTERM)
+    }
+
     private var nextID = 0
     private var completions: [Int: ([String: Any]) -> Void] = [:]
     private let lock = NSLock()
@@ -25,7 +31,6 @@ final class CDPConnection {
             throw SocketError(message: "pipe() failed")
         }
 
-        // Chromium reads CDP messages from fd 3 and writes them to fd 4.
         #if os(Linux)
         var fileActions = posix_spawn_file_actions_t()
         #else
@@ -124,7 +129,9 @@ final class CDPConnection {
         Thread.detachNewThread { [weak self] in
             var status: Int32 = 0
             waitpid(childPID, &status, 0)
-            DispatchQueue.main.async { self?.onExit?(status) }
+            let exitStatus = status
+            let connection = self
+            DispatchQueue.main.async { connection?.onExit?(exitStatus) }
         }
     }
 }
