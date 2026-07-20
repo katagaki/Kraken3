@@ -10,6 +10,14 @@ final class BrowserSession {
         var loading = false
         var canGoBack = false
         var canGoForward = false
+        var navError: [String: String]?
+        var mainFrameId: String?
+        var lastGoodURL: String?
+        // True from the moment we start auto-navigating away from a committed
+        // Chromium error page until any navigation commits.
+        var escaping = false
+
+        var hideFrames: Bool { navError != nil || escaping }
 
         init(targetId: String) { self.targetId = targetId }
     }
@@ -135,6 +143,11 @@ final class BrowserSession {
             guard let self, let sessionId = result["sessionId"] as? String else { return }
             tab.sessionId = sessionId
             self.cdp.send("Page.enable", sessionId: sessionId)
+            self.cdp.send("Page.getFrameTree", sessionId: sessionId) { result in
+                let frameTree = result["frameTree"] as? [String: Any]
+                let frame = frameTree?["frame"] as? [String: Any]
+                tab.mainFrameId = frame?["id"] as? String ?? tab.mainFrameId
+            }
             self.installPickerHooks(sessionId: sessionId)
             self.configureSession(tab, reload: false)
             if let destination = navigateTo, let url = Navigation.destinationURL(for: destination) {
@@ -151,6 +164,11 @@ final class BrowserSession {
     // Installs the picker script + binding into a target and auto-attaches its
     // cross-origin subframes so the same hooks reach every frame.
     private func installPickerHooks(sessionId: String) {
+        // Pause every document request (navigations, redirect hops, iframe
+        // loads) so in-page navigations get the same filtering as the URL bar.
+        cdp.send("Fetch.enable", [
+            "patterns": [["urlPattern": "*", "resourceType": "Document", "requestStage": "Request"]]
+        ], sessionId: sessionId)
         cdp.send("Runtime.enable", sessionId: sessionId)
         cdp.send("Runtime.addBinding", ["name": "__krakenPicker"], sessionId: sessionId)
         cdp.send("Page.addScriptToEvaluateOnNewDocument",
@@ -250,7 +268,8 @@ final class BrowserSession {
             if let ackId = params["sessionId"] as? Int {
                 cdp.send("Page.screencastFrameAck", ["sessionId": ackId], sessionId: sessionId)
             }
-            guard sessionId == activeTab?.sessionId,
+            guard let tab = activeTab, sessionId == tab.sessionId,
+                  !tab.hideFrames,
                   let base64 = params["data"] as? String,
                   let jpeg = Data(base64Encoded: base64),
                   jpeg != lastFrame else { return }
@@ -273,6 +292,74 @@ final class BrowserSession {
                     tab.canGoForward = index < entries.count - 1
                 }
                 self?.broadcastState()
+            }
+
+        case "Page.frameNavigated":
+            // A main-frame navigation that Chromium could not complete (bad DNS,
+            // refused connection, cert interstitial, …) commits an error page
+            // with unreachableUrl set. Surface it to the client and immediately
+            // leave the error page so it is never streamed or interacted with.
+            guard let tab = tabs.first(where: { $0.sessionId == sessionId }),
+                  let frame = params["frame"] as? [String: Any],
+                  frame["parentId"] == nil else { return }
+            tab.mainFrameId = frame["id"] as? String ?? tab.mainFrameId
+            fputs("KDBG frameNavigated url=\(frame["url"] as? String ?? "") unreachable=\(frame["unreachableUrl"] as? String ?? "-") escaping=\(tab.escaping) navError=\(tab.navError?["url"] ?? "-")\n", stderr)
+            if let unreachable = frame["unreachableUrl"] as? String, !unreachable.isEmpty {
+                // Keep an existing error (it may carry a precise code from the
+                // Page.navigate response or the fetch guard for the same load).
+                if tab.navError == nil {
+                    tab.navError = ["url": unreachable, "code": ""]
+                }
+                // Also reached when the escape target itself failed; resetting
+                // lets the next escape walk further back in history.
+                tab.escaping = false
+                escapeErrorPage(tab, failedURL: unreachable)
+            } else if tab.escaping {
+                tab.escaping = false
+            } else {
+                tab.navError = nil
+            }
+            broadcastState()
+
+        case "Fetch.requestPaused":
+            guard let sessionId, let requestId = params["requestId"] as? String else { return }
+            let urlString = (params["request"] as? [String: Any])?["url"] as? String ?? ""
+            let frameId = params["frameId"] as? String
+            // Resolve the owning tab so a blocked main-frame document can raise
+            // the error overlay; iframe documents are failed silently.
+            let rootSession = frameOwner[sessionId] ?? sessionId
+            let tab = tabs.first { $0.sessionId == rootSession }
+            guard let url = URL(string: urlString) else {
+                cdp.send("Fetch.failRequest",
+                         ["requestId": requestId, "errorReason": "BlockedByClient"],
+                         sessionId: sessionId)
+                return
+            }
+            URLFilter.evaluateURL(url) { [weak self] verdict in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    let isMainFrame = tab != nil && frameId != nil && frameId == tab?.mainFrameId
+                    switch verdict {
+                    case .allowed:
+                        self.cdp.send("Fetch.continueRequest", ["requestId": requestId],
+                                      sessionId: sessionId)
+                    case .unresolvable:
+                        // Chromium will fail this itself; pre-record the precise
+                        // code so the overlay can name the DNS failure.
+                        if isMainFrame, let tab {
+                            self.setNavError(tab, url: urlString, code: "ERR_NAME_NOT_RESOLVED")
+                        }
+                        self.cdp.send("Fetch.continueRequest", ["requestId": requestId],
+                                      sessionId: sessionId)
+                    case .blocked, .invalid:
+                        if isMainFrame, let tab {
+                            self.setNavError(tab, url: urlString, code: "BLOCKED")
+                        }
+                        self.cdp.send("Fetch.failRequest",
+                                      ["requestId": requestId, "errorReason": "BlockedByClient"],
+                                      sessionId: sessionId)
+                    }
+                }
             }
 
         case "Target.attachedToTarget":
@@ -326,7 +413,7 @@ final class BrowserSession {
              "url": tab.url,
              "active": tab.targetId == activeTabID]
         }
-        onState?([
+        var state: [String: Any] = [
             "type": "state",
             "url": active?.url ?? "",
             "title": active?.title ?? "",
@@ -335,7 +422,11 @@ final class BrowserSession {
             "canGoBack": active?.canGoBack ?? false,
             "canGoForward": active?.canGoForward ?? false,
             "tabs": tabList
-        ])
+        ]
+        if let navError = active?.navError {
+            state["navError"] = navError
+        }
+        onState?(state)
     }
 
     private func broadcastDownloads() {
@@ -400,13 +491,31 @@ final class BrowserSession {
                 for tab in tabs { applyColorScheme(tab) }
             }
         case "navigate":
-            if let raw = message["url"] as? String, let sessionId = activeTab?.sessionId {
-                URLFilter.resolveSafe(raw) { [weak self] url in
-                    guard let self, let url else { return }
+            if let raw = message["url"] as? String, let tabID = activeTabID {
+                URLFilter.evaluate(raw) { [weak self] verdict in
                     DispatchQueue.main.async {
-                        self.cdp.send("Page.navigate", ["url": url.absoluteString], sessionId: sessionId)
+                        guard let self,
+                              let tab = self.tabs.first(where: { $0.targetId == tabID }) else { return }
+                        switch verdict {
+                        case .allowed(let url):
+                            tab.navError = nil
+                            if let sessionId = tab.sessionId {
+                                self.navigate(tab, to: url, sessionId: sessionId)
+                            }
+                        case .unresolvable(let url):
+                            self.setNavError(tab, url: url.absoluteString, code: "ERR_NAME_NOT_RESOLVED")
+                        case .blocked(let url):
+                            self.setNavError(tab, url: url.absoluteString, code: "BLOCKED")
+                        case .invalid:
+                            break
+                        }
                     }
                 }
+            }
+        case "dismisserror":
+            if let tab = activeTab, tab.navError != nil {
+                tab.navError = nil
+                broadcastState()
             }
         case "newtab":
             newTab()
@@ -419,11 +528,14 @@ final class BrowserSession {
                 switchTab(id: id)
             }
         case "back":
+            clearNavError()
             evaluate("history.back()")
         case "forward":
+            clearNavError()
             evaluate("history.forward()")
         case "reload":
-            if let sessionId = activeTab?.sessionId {
+            if let tab = activeTab, let sessionId = tab.sessionId {
+                clearNavError()
                 cdp.send("Page.reload", sessionId: sessionId)
             }
         case "stop":
@@ -433,6 +545,61 @@ final class BrowserSession {
         default:
             break
         }
+    }
+
+    private func navigate(_ tab: HeadlessTab, to url: URL, sessionId: String) {
+        cdp.send("Page.navigate", ["url": url.absoluteString], sessionId: sessionId) { [weak self] result in
+            guard let self,
+                  let errorText = result["errorText"] as? String, !errorText.isEmpty,
+                  // ERR_ABORTED is not a failure the user should see: it fires
+                  // when a navigation turns into a download or is superseded.
+                  errorText != "net::ERR_ABORTED" else { return }
+            let code = errorText.hasPrefix("net::") ? String(errorText.dropFirst(5)) : errorText
+            self.setNavError(tab, url: url.absoluteString, code: code)
+        }
+    }
+
+    private func setNavError(_ tab: HeadlessTab, url: String, code: String) {
+        tab.navError = ["url": url, "code": code]
+        broadcastState()
+    }
+
+    // Chromium has committed an error page (net error or interstitial). Return
+    // to the last good history entry — or a blank page — so the error page is
+    // never shown; the overlay reports the failure instead.
+    private func escapeErrorPage(_ tab: HeadlessTab, failedURL: String) {
+        guard let sessionId = tab.sessionId, !tab.escaping else { return }
+        tab.escaping = true
+        cdp.send("Page.getNavigationHistory", sessionId: sessionId) { [weak self] result in
+            guard let self else { return }
+            // Committed net-error pages own a history entry (whose URL is the
+            // error page's document URL, e.g. a redirect target rather than
+            // what the user typed); cert interstitials own none, leaving the
+            // last good page current. Walk back past any entry for the failed
+            // document URL and re-commit the nearest good entry.
+            if let index = result["currentIndex"] as? Int,
+               let entries = result["entries"] as? [[String: Any]] {
+                fputs("KDBG escape failed=\(failedURL) index=\(index) entries=\(entries.map { $0["url"] as? String ?? "?" })\n", stderr)
+                var target = index
+                while entries.indices.contains(target),
+                      (entries[target]["url"] as? String) == failedURL { target -= 1 }
+                if entries.indices.contains(target),
+                   let entryId = entries[target]["id"] as? Int {
+                    fputs("KDBG escape -> entry \(target) \(entries[target]["url"] as? String ?? "?")\n", stderr)
+                    self.cdp.send("Page.navigateToHistoryEntry", ["entryId": entryId],
+                                  sessionId: sessionId)
+                    return
+                }
+            }
+            fputs("KDBG escape -> about:blank fallback\n", stderr)
+            self.cdp.send("Page.navigate", ["url": "about:blank"], sessionId: sessionId)
+        }
+    }
+
+    private func clearNavError() {
+        guard let tab = activeTab, tab.navError != nil else { return }
+        tab.navError = nil
+        broadcastState()
     }
 
     private func applyViewport(width: Double, height: Double, devicePixelRatio: Double) {

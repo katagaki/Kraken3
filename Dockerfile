@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/.build/release/Kraken /usr/local/bin/kraken
 COPY --from=build /app/.build/release/KrakenReaper /usr/local/bin/kraken-reaper
+COPY chromium-policy.json /etc/chromium/policies/managed/kraken.json
 RUN useradd --create-home kraken && mkdir -p /data/sessions && chown -R kraken /data
 USER kraken
 EXPOSE 8080

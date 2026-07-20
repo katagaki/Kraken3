@@ -19,33 +19,44 @@ enum URLFilter {
         "kubernetes.default"
     ]
 
-    static func resolveSafe(_ raw: String, completion: @escaping (URL?) -> Void) {
+    enum Verdict {
+        case allowed(URL)
+        case unresolvable(URL)
+        case blocked(URL)
+        case invalid
+    }
+
+    static func evaluate(_ raw: String, completion: @escaping (Verdict) -> Void) {
         queue.async {
             guard let url = Navigation.destinationURL(for: raw) else {
-                completion(nil)
+                completion(.invalid)
                 return
             }
-            completion(isSafe(url) ? url : nil)
+            completion(verdict(for: url))
         }
     }
 
-    static func isSafe(_ url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https" else { return false }
-        guard var host = url.host?.lowercased(), !host.isEmpty else { return false }
+    static func evaluateURL(_ url: URL, completion: @escaping (Verdict) -> Void) {
+        queue.async { completion(verdict(for: url)) }
+    }
 
-        if blockedHosts.contains(host) { return false }
+    static func verdict(for url: URL) -> Verdict {
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return .blocked(url) }
+        guard var host = url.host?.lowercased(), !host.isEmpty else { return .invalid }
+
+        if blockedHosts.contains(host) { return .blocked(url) }
         if host.hasSuffix(".localhost") || host.hasSuffix(".local")
-            || host.hasSuffix(".internal") { return false }
-        if host.allSatisfy({ $0.isNumber }) { return false }
+            || host.hasSuffix(".internal") { return .blocked(url) }
+        if host.allSatisfy({ $0.isNumber }) { return .blocked(url) }
         if host.hasSuffix(".") { host = String(host.dropLast()) }
 
         let addresses = resolve(host)
-        guard !addresses.isEmpty else { return false }
+        guard !addresses.isEmpty else { return .unresolvable(url) }
         for address in addresses where NetworkACL.isBlockedDestination(address) {
-            return false
+            return .blocked(url)
         }
-        return true
+        return .allowed(url)
     }
 
     private static func resolve(_ host: String) -> [String] {

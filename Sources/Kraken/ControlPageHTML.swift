@@ -396,6 +396,62 @@ let controlPageHTML = #"""
   .picker-done { background: var(--cds-interactive); color: #ffffff; }
   .picker-done:active { background: var(--cds-interactive-active); }
 
+  #errPanel {
+    position: absolute;
+    inset: 0;
+    background: var(--cds-background);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 9;
+  }
+  #errPanel.open { display: flex; }
+  #errBox {
+    width: 100%;
+    max-width: 420px;
+    background: var(--cds-layer);
+    border-left: 3px solid #fa4d56;
+    padding: 20px;
+  }
+  #errTitle {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--cds-text-primary);
+    margin-bottom: 8px;
+  }
+  #errMsg {
+    font-size: 14px;
+    color: var(--cds-text-secondary);
+    line-height: 1.4;
+  }
+  #errURL {
+    font-size: 13px;
+    color: var(--cds-text-helper);
+    margin-top: 12px;
+    word-break: break-all;
+  }
+  #errCode {
+    font-size: 12px;
+    font-family: ui-monospace, Menlo, monospace;
+    color: var(--cds-text-helper);
+    margin-top: 4px;
+  }
+  #errActions { display: flex; gap: 8px; margin-top: 20px; }
+  #errActions button {
+    flex: 1;
+    height: 48px;
+    border: none;
+    border-radius: 0;
+    font-family: inherit;
+    font-size: 14px;
+    padding: 0 16px;
+  }
+  #errDismiss { background: var(--cds-field-02); color: var(--cds-text-primary); }
+  #errDismiss:active { background: var(--cds-layer-active); }
+  #errRetry { background: var(--cds-interactive); color: #ffffff; }
+  #errRetry:active { background: var(--cds-interactive-active); }
+
   #disconnected {
     position: absolute;
     inset: 0;
@@ -426,6 +482,18 @@ let controlPageHTML = #"""
     <div id="overlay"></div>
     <div id="status"></div>
     <div id="dragHint">Drag mode</div>
+    <div id="errPanel">
+      <div id="errBox">
+        <div id="errTitle"></div>
+        <div id="errMsg"></div>
+        <div id="errURL"></div>
+        <div id="errCode"></div>
+        <div id="errActions">
+          <button id="errDismiss"></button>
+          <button id="errRetry"></button>
+        </div>
+      </div>
+    </div>
     <div id="disconnected"><span>Reconnecting&hellip;</span></div>
     <div id="pastePanel">
       <div id="pasteSheet">
@@ -479,7 +547,14 @@ let controlPageHTML = #"""
           failed: 'Failed', downloading: 'downloading', of: 'of', loading: 'Loading ',
           pickSelect: 'Choose an option', pickDate: 'Choose a value',
           pickColor: 'Choose a color', pickInput: 'Enter a value',
-          done: 'Done', cancel: 'Cancel' },
+          done: 'Done', cancel: 'Cancel',
+          errBlockedTitle: 'Access blocked',
+          errBlockedMsg: 'This address is not allowed in Kraken.',
+          errDnsTitle: 'Server not found',
+          errDnsMsg: 'The server address could not be found. Check the address and try again.',
+          errGenericTitle: 'This page can’t be loaded',
+          errGenericMsg: 'The page could not be loaded. The server may be unreachable or refusing connections.',
+          errRetry: 'Try again', errDismiss: 'Dismiss' },
     ja: { back: '戻る', forward: '進む', reload: '再読み込み',
           newTab: '新しいタブ', paste: '貼り付け',
           keyboard: 'キーボード', downloads: 'ダウンロード',
@@ -494,7 +569,14 @@ let controlPageHTML = #"""
           loading: '読み込み中 ',
           pickSelect: '選択してください', pickDate: '値を選択',
           pickColor: '色を選択', pickInput: '値を入力',
-          done: '完了', cancel: 'キャンセル' }
+          done: '完了', cancel: 'キャンセル',
+          errBlockedTitle: 'アクセスがブロックされました',
+          errBlockedMsg: 'このアドレスは Kraken では開けません。',
+          errDnsTitle: 'サーバーが見つかりません',
+          errDnsMsg: 'サーバーのアドレスが見つかりませんでした。アドレスを確認してもう一度お試しください。',
+          errGenericTitle: 'ページを読み込めません',
+          errGenericMsg: 'ページを読み込めませんでした。サーバーに接続できないか、接続が拒否されました。',
+          errRetry: '再試行', errDismiss: '閉じる' }
   };
   var LANG = (navigator.language || 'en').toLowerCase().indexOf('ja') === 0 ? 'ja' : 'en';
   var T = I18N[LANG];
@@ -628,6 +710,7 @@ let controlPageHTML = #"""
 
   function handleState(msg) {
     renderTabs(msg.tabs);
+    if (msg.navError) showNavError(msg.navError); else hideNavError();
     if (!urlFocused) urlField.value = msg.url || '';
     document.getElementById('btnBack').disabled = !msg.canGoBack;
     document.getElementById('btnForward').disabled = !msg.canGoForward;
@@ -641,6 +724,39 @@ let controlPageHTML = #"""
       document.title = msg.title ? msg.title + ' - Kraken' : 'Kraken';
     }
   }
+
+  var errPanel = document.getElementById('errPanel');
+  var errRetryBtn = document.getElementById('errRetry');
+  var navErrorURL = null;
+
+  function showNavError(err) {
+    navErrorURL = err.url || '';
+    var code = err.code || '';
+    var blocked = code === 'BLOCKED' || code === 'ERR_BLOCKED_BY_CLIENT' ||
+                  code === 'ERR_BLOCKED_BY_ADMINISTRATOR';
+    var dns = code === 'ERR_NAME_NOT_RESOLVED';
+    document.getElementById('errTitle').textContent =
+      blocked ? T.errBlockedTitle : dns ? T.errDnsTitle : T.errGenericTitle;
+    document.getElementById('errMsg').textContent =
+      blocked ? T.errBlockedMsg : dns ? T.errDnsMsg : T.errGenericMsg;
+    document.getElementById('errURL').textContent = navErrorURL;
+    document.getElementById('errCode').textContent = (!blocked && code) ? code : '';
+    errRetryBtn.style.display = blocked ? 'none' : '';
+    errPanel.classList.add('open');
+  }
+
+  function hideNavError() {
+    navErrorURL = null;
+    errPanel.classList.remove('open');
+  }
+
+  errRetryBtn.addEventListener('click', function () {
+    if (navErrorURL) send({ type: 'navigate', url: navErrorURL });
+  });
+  document.getElementById('errDismiss').addEventListener('click', function () {
+    hideNavError();
+    send({ type: 'dismisserror' });
+  });
 
   // Rounded integer dimensions rarely match exactly; fill to avoid letterbox hairlines.
   var screenFillMode = false;
@@ -1116,6 +1232,8 @@ let controlPageHTML = #"""
     if (pasteTextField) pasteTextField.placeholder = T.pasteHere;
     var downloadsTitleEl = document.querySelector('#dlSheet h2');
     if (downloadsTitleEl) downloadsTitleEl.textContent = T.downloads;
+    errRetryBtn.textContent = T.errRetry;
+    document.getElementById('errDismiss').textContent = T.errDismiss;
     dlList.innerHTML = '<div class="dl-empty">' + T.noDownloads + '</div>';
   }
   localizeStatic();
