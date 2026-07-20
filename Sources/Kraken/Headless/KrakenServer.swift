@@ -110,7 +110,7 @@ final class KrakenServer {
             return authed(status: "200 OK", body: Data(controlPageHTML.utf8),
                           contentType: "text/html; charset=utf-8", auth: auth)
         }
-        switch sessions.obtainForNewClient() {
+        switch sessions.obtainForNewClient(acceptLanguage: request.headers["accept-language"]) {
         case .created(let auth):
             return authed(status: "200 OK", body: Data(controlPageHTML.utf8),
                           contentType: "text/html; charset=utf-8", auth: auth)

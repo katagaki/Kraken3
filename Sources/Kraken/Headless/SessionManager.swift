@@ -115,7 +115,7 @@ final class SessionManager {
         case failed(String)
     }
 
-    func obtainForNewClient() -> ObtainResult {
+    func obtainForNewClient(acceptLanguage: String?) -> ObtainResult {
         createQueue.sync {
             lock.lock()
             if config.singleUser, let claimed = claimedSessionID, sessions[claimed] != nil {
@@ -136,7 +136,8 @@ final class SessionManager {
             try? fm.createDirectory(at: profileDir, withIntermediateDirectories: true)
             try? fm.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
 
-            let made = makeBrowser(profileDir: profileDir, downloadsDir: downloadsDir)
+            let made = makeBrowser(profileDir: profileDir, downloadsDir: downloadsDir,
+                                   acceptLanguage: acceptLanguage)
             guard case .success(let browser) = made else {
                 try? fm.removeItem(at: dir)
                 if case .failure(let error) = made { return .failed("\(error)") }
@@ -160,13 +161,15 @@ final class SessionManager {
         }
     }
 
-    private func makeBrowser(profileDir: URL, downloadsDir: URL) -> Result<BrowserSession, Error> {
+    private func makeBrowser(profileDir: URL, downloadsDir: URL,
+                             acceptLanguage: String?) -> Result<BrowserSession, Error> {
         func build() -> Result<BrowserSession, Error> {
             Result {
                 try BrowserSession(chromiumPath: config.chromiumPath,
                                    homepage: config.homepage,
                                    profileDir: profileDir,
-                                   downloadsDir: downloadsDir)
+                                   downloadsDir: downloadsDir,
+                                   acceptLanguage: acceptLanguage)
             }
         }
         if Thread.isMainThread { return build() }

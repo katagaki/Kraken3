@@ -17,6 +17,7 @@ final class BrowserSession {
     private let cdp: CDPConnection
     private let downloads: HeadlessDownloads
     private let homepage: String
+    private let acceptLanguage: String
 
     var onState: (([String: Any]) -> Void)?
     var onDownloads: (([String: Any]) -> Void)?
@@ -30,6 +31,7 @@ final class BrowserSession {
     private var viewportWidth: Double = 1280
     private var viewportHeight: Double = 800
     private var devicePixelRatio: Double = 1
+    private var colorScheme = "light"
     private var lastFrame: Data?
 
     private static let desktopUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -42,12 +44,16 @@ final class BrowserSession {
 
     var processID: pid_t { cdp.processID }
 
-    init(chromiumPath: String, homepage: String, profileDir: URL, downloadsDir: URL) throws {
+    init(chromiumPath: String, homepage: String, profileDir: URL, downloadsDir: URL,
+         acceptLanguage rawAcceptLanguage: String?) throws {
         self.homepage = homepage
+        let trimmed = rawAcceptLanguage?.trimmingCharacters(in: .whitespaces)
+        let value = (trimmed?.isEmpty == false) ? trimmed! : "en-US,en"
+        self.acceptLanguage = value
         self.downloads = HeadlessDownloads(directory: downloadsDir)
 
         cdp = try CDPConnection(chromiumPath: chromiumPath, arguments: [
-            "--headless",
+            "--headless=new",
             "--remote-debugging-pipe",
             "--no-sandbox",
             "--disable-gpu",
@@ -161,20 +167,28 @@ final class BrowserSession {
             "deviceScaleFactor": snapshotScale,
             "mobile": isMobileViewport
         ], sessionId: sessionId)
-        cdp.send("Emulation.setUserAgentOverride", ["userAgent": currentUserAgent], sessionId: sessionId)
+        cdp.send("Emulation.setUserAgentOverride",
+                 ["userAgent": currentUserAgent, "acceptLanguage": acceptLanguage], sessionId: sessionId)
+        applyColorScheme(tab)
         if reload {
             cdp.send("Page.reload", sessionId: sessionId)
         }
     }
 
+    private func applyColorScheme(_ tab: HeadlessTab) {
+        guard let sessionId = tab.sessionId else { return }
+        cdp.send("Emulation.setEmulatedMedia",
+                 ["media": "", "features": [["name": "prefers-color-scheme", "value": colorScheme]]],
+                 sessionId: sessionId)
+    }
+
     private func startScreencast(_ tab: HeadlessTab) {
         guard let sessionId = tab.sessionId else { return }
-        let maxDimension = 2048.0
         cdp.send("Page.startScreencast", [
             "format": "jpeg",
             "quality": 60,
-            "maxWidth": Int(min(viewportWidth * snapshotScale, maxDimension)),
-            "maxHeight": Int(min(viewportHeight * snapshotScale, maxDimension)),
+            "maxWidth": Int(viewportWidth * snapshotScale),
+            "maxHeight": Int(viewportHeight * snapshotScale),
             "everyNthFrame": 1
         ], sessionId: sessionId)
     }
@@ -325,6 +339,11 @@ final class BrowserSession {
                 applyViewport(width: width, height: height,
                               devicePixelRatio: doubleValue(message["dpr"]) ?? 1)
             }
+        case "colorscheme":
+            if let value = message["value"] as? String, value == "dark" || value == "light" {
+                colorScheme = value
+                for tab in tabs { applyColorScheme(tab) }
+            }
         case "navigate":
             if let raw = message["url"] as? String, let sessionId = activeTab?.sessionId {
                 URLFilter.resolveSafe(raw) { [weak self] url in
@@ -363,8 +382,8 @@ final class BrowserSession {
 
     private func applyViewport(width: Double, height: Double, devicePixelRatio: Double) {
         let previousUserAgent = currentUserAgent
-        viewportWidth = min(max(width, 320), 1600)
-        viewportHeight = min(max(height, 320), 1600)
+        viewportWidth = max(width, 320)
+        viewportHeight = max(height, 320)
         self.devicePixelRatio = devicePixelRatio
         let userAgentChanged = currentUserAgent != previousUserAgent
         for tab in tabs {
@@ -441,4 +460,5 @@ final class BrowserSession {
         if let number = value as? NSNumber { return number.doubleValue }
         return nil
     }
+
 }

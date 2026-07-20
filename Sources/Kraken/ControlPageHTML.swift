@@ -387,6 +387,31 @@ let controlPageHTML = #"""
 (function () {
   'use strict';
 
+  var I18N = {
+    en: { back: 'Back', forward: 'Forward', reload: 'Reload', newTab: 'New tab',
+          paste: 'Paste', keyboard: 'Keyboard', downloads: 'Downloads',
+          searchOrAddress: 'Search or enter address', dragMode: 'Drag mode',
+          reconnecting: 'Reconnecting…', pasteTitle: 'Paste into browser',
+          pasteSend: 'Send to focused field',
+          pasteHint: 'Text is typed into whatever field is focused in the remote browser.',
+          pasteHere: 'Paste text here', noDownloads: 'No downloads yet',
+          failed: 'Failed', downloading: 'downloading', of: 'of', loading: 'Loading ' },
+    ja: { back: '戻る', forward: '進む', reload: '再読み込み',
+          newTab: '新しいタブ', paste: '貼り付け',
+          keyboard: 'キーボード', downloads: 'ダウンロード',
+          searchOrAddress: '検索またはアドレスを入力',
+          dragMode: 'ドラッグモード', reconnecting: '再接続中…',
+          pasteTitle: 'ブラウザに貼り付け',
+          pasteSend: 'フォーカス中の入力欄に送信',
+          pasteHint: 'リモートブラウザでフォーカス中の入力欄に文字が入力されます。',
+          pasteHere: 'ここにテキストを貼り付け',
+          noDownloads: 'ダウンロードはまだありません',
+          failed: '失敗', downloading: 'ダウンロード中', of: '/',
+          loading: '読み込み中 ' }
+  };
+  var LANG = (navigator.language || 'en').toLowerCase().indexOf('ja') === 0 ? 'ja' : 'en';
+  var T = I18N[LANG];
+
   var wsURL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
   var ws = null;
   var screenEl = document.getElementById('screen');
@@ -435,12 +460,26 @@ let controlPageHTML = #"""
     new ResizeObserver(queueViewport).observe(document.getElementById('screenWrap'));
   }
 
+  function sendColorScheme() {
+    var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    send({ type: 'colorscheme', value: dark ? 'dark' : 'light' });
+  }
+  if (window.matchMedia) {
+    var colorSchemeQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    if (colorSchemeQuery.addEventListener) {
+      colorSchemeQuery.addEventListener('change', sendColorScheme);
+    } else if (colorSchemeQuery.addListener) {
+      colorSchemeQuery.addListener(sendColorScheme);
+    }
+  }
+
   function connect() {
     ws = new WebSocket(wsURL);
     ws.binaryType = 'blob';
     ws.onopen = function () {
       disconnectedEl.style.display = 'none';
       sendViewport();
+      sendColorScheme();
     };
     ws.onclose = function () {
       disconnectedEl.style.display = 'flex';
@@ -475,7 +514,7 @@ let controlPageHTML = #"""
 
       var title = document.createElement('span');
       title.className = 'tab-title';
-      title.textContent = tab.title || tab.url || 'New tab';
+      title.textContent = tab.title || tab.url || T.newTab;
       el.appendChild(title);
 
       var close = document.createElement('span');
@@ -506,7 +545,7 @@ let controlPageHTML = #"""
     document.getElementById('btnForward').disabled = !msg.canGoForward;
     if (msg.loading) {
       progressEl.style.width = Math.round((msg.progress || 0) * 100) + '%';
-      statusEl.textContent = 'Loading ' + (msg.title || msg.url || '');
+      statusEl.textContent = T.loading + (msg.title || msg.url || '');
       statusEl.style.display = 'block';
     } else {
       progressEl.style.width = '0';
@@ -746,6 +785,22 @@ let controlPageHTML = #"""
     keyboardInput.value = '';
   });
 
+  var pasteTextField = document.getElementById('pasteText');
+  document.addEventListener('keydown', function (event) {
+    var active = document.activeElement;
+    if (active === urlField || active === keyboardInput || active === pasteTextField) return;
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    var special = ['Enter', 'Backspace', 'Tab', 'Escape',
+                   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+    if (special.indexOf(event.key) !== -1) {
+      event.preventDefault();
+      send({ type: 'key', key: event.key });
+    } else if (event.key && event.key.length === 1) {
+      event.preventDefault();
+      send({ type: 'text', value: event.key });
+    }
+  });
+
   var pastePanel = document.getElementById('pastePanel');
   var pasteText = document.getElementById('pasteText');
 
@@ -792,7 +847,7 @@ let controlPageHTML = #"""
   function renderDownloads(items) {
     dlList.innerHTML = '';
     if (!items.length) {
-      dlList.innerHTML = '<div class="dl-empty">No downloads yet</div>';
+      dlList.innerHTML = '<div class="dl-empty">' + T.noDownloads + '</div>';
       return;
     }
     items.forEach(function (item) {
@@ -808,12 +863,12 @@ let controlPageHTML = #"""
       var meta = document.createElement('div');
       meta.className = 'dl-meta';
       if (item.failed) {
-        meta.textContent = 'Failed';
+        meta.textContent = T.failed;
       } else if (item.done) {
         meta.textContent = formatSize(item.size);
       } else {
         meta.textContent = formatSize(item.received) +
-          (item.size > 0 ? ' of ' + formatSize(item.size) : '') + ' - downloading';
+          (item.size > 0 ? ' ' + T.of + ' ' + formatSize(item.size) : '') + ' - ' + T.downloading;
         var bar = document.createElement('div');
         bar.className = 'dl-bar';
         var fill = document.createElement('div');
@@ -841,6 +896,32 @@ let controlPageHTML = #"""
       dlList.appendChild(row);
     });
   }
+
+  function localizeStatic() {
+    document.documentElement.lang = LANG;
+    var titles = { btnBack: 'back', btnForward: 'forward', btnReload: 'reload',
+                   btnNewTab: 'newTab', btnPaste: 'paste', btnKeyboard: 'keyboard',
+                   btnDownloads: 'downloads' };
+    Object.keys(titles).forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.title = T[titles[id]];
+    });
+    urlField.placeholder = T.searchOrAddress;
+    dragHintEl.textContent = T.dragMode;
+    var disconnectedText = document.querySelector('#disconnected span');
+    if (disconnectedText) disconnectedText.textContent = T.reconnecting;
+    var pasteTitleEl = document.querySelector('#pasteSheet h2');
+    if (pasteTitleEl) pasteTitleEl.textContent = T.pasteTitle;
+    var pasteSendEl = document.getElementById('pasteSend');
+    if (pasteSendEl) pasteSendEl.textContent = T.pasteSend;
+    var pasteHintEl = document.getElementById('pasteHint');
+    if (pasteHintEl) pasteHintEl.textContent = T.pasteHint;
+    if (pasteTextField) pasteTextField.placeholder = T.pasteHere;
+    var downloadsTitleEl = document.querySelector('#dlSheet h2');
+    if (downloadsTitleEl) downloadsTitleEl.textContent = T.downloads;
+    dlList.innerHTML = '<div class="dl-empty">' + T.noDownloads + '</div>';
+  }
+  localizeStatic();
 
   connect();
 })();
