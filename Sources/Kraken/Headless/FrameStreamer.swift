@@ -187,7 +187,7 @@ final class FrameStreamer {
         let now = Date()
         guard now.timeIntervalSince(lastKickTime) > 1 else { return }
         lastKickTime = now
-        DispatchQueue.main.async { self.onScreencastConfigChange?() }
+        onScreencastConfigChange?()
     }
 
     private func flushPending() {
@@ -221,7 +221,7 @@ final class FrameStreamer {
         publishedFormat = format
         publishedQuality = qualityTiers[qualityTier]
         stateLock.unlock()
-        DispatchQueue.main.async { self.onScreencastConfigChange?() }
+        onScreencastConfigChange?()
     }
 
     private func scheduleCalmCheck() {

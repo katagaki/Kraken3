@@ -20,10 +20,15 @@ final class BrowserSession {
         init(targetId: String) { self.targetId = targetId }
     }
 
+    // Serializes all session state; CDP events, control messages, and the
+    // downloads store all run on it so nothing here needs the main queue.
+    private let queue = DispatchQueue(label: "kraken.session")
     private let cdp: CDPConnection
     private let downloads: HeadlessDownloads
     private let homepage: String
     private let acceptLanguage: String
+    private let maxTabs: Int
+    private var paused = false
 
     var onState: (([String: Any]) -> Void)?
     var onDownloads: (([String: Any]) -> Void)?
@@ -63,14 +68,16 @@ final class BrowserSession {
 
     init(chromiumPath: String, homepage: String, profileDir: URL, downloadsDir: URL,
          acceptLanguage rawAcceptLanguage: String?,
+         extraArguments: [String] = [], maxTabs: Int = 8,
          restoreTabs: [String] = [], restoreActiveIndex: Int = 0) throws {
         self.homepage = homepage
+        self.maxTabs = max(maxTabs, 1)
         self.restoreTabs = restoreTabs
         self.restoreActiveIndex = restoreActiveIndex
         let trimmed = rawAcceptLanguage?.trimmingCharacters(in: .whitespaces)
         let value = (trimmed?.isEmpty == false) ? trimmed! : "en-US,en"
         self.acceptLanguage = value
-        self.downloads = HeadlessDownloads(directory: downloadsDir)
+        self.downloads = HeadlessDownloads(directory: downloadsDir, queue: queue)
 
         cdp = try CDPConnection(chromiumPath: chromiumPath, arguments: [
             "--headless=new",
@@ -84,9 +91,10 @@ final class BrowserSession {
             "--hide-scrollbars",
             "--mute-audio",
             "--user-data-dir=\(profileDir.path)",
-            "--window-size=1280,800",
+            "--window-size=1280,800"
+        ] + extraArguments + [
             "about:blank"
-        ])
+        ], queue: queue)
 
         cdp.onEvent = { [weak self] method, params, sessionId in
             self?.handleEvent(method, params, sessionId)
@@ -100,9 +108,12 @@ final class BrowserSession {
 
         streamer.onSend = { [weak self] data in self?.onFrame?(data) }
         streamer.onScreencastConfigChange = { [weak self] in
-            guard let self, let tab = self.activeTab, let sessionId = tab.sessionId else { return }
-            self.cdp.send("Page.stopScreencast", sessionId: sessionId)
-            self.startScreencast(tab)
+            guard let self else { return }
+            self.queue.async {
+                guard !self.paused, let tab = self.activeTab, let sessionId = tab.sessionId else { return }
+                self.cdp.send("Page.stopScreencast", sessionId: sessionId)
+                self.startScreencast(tab)
+            }
         }
 
         cdp.send("Browser.setDownloadBehavior", [
@@ -140,26 +151,48 @@ final class BrowserSession {
     }
 
     func syncNewClient() {
-        broadcastState()
-        broadcastDownloads()
-        streamer.syncClient()
+        queue.async {
+            let wasPaused = self.paused
+            self.paused = false
+            if wasPaused, let tab = self.activeTab {
+                self.startScreencast(tab)
+            }
+            self.broadcastState()
+            self.broadcastDownloads()
+            self.streamer.syncClient()
+        }
+    }
+
+    func clientsGone() {
+        queue.async {
+            guard !self.paused else { return }
+            self.paused = true
+            if let sessionId = self.activeTab?.sessionId {
+                self.cdp.send("Page.stopScreencast", sessionId: sessionId)
+            }
+        }
     }
 
     func shutdown() {
         cdp.terminate()
     }
 
-    func entries() -> [DownloadEntry] { downloads.entries() }
-    func fileURL(named name: String) -> URL? { downloads.fileURL(named: name) }
-    func deleteFile(named name: String) -> Bool { downloads.deleteFile(named: name) }
+    func entries() -> [DownloadEntry] { queue.sync { downloads.entries() } }
+    func fileURL(named name: String) -> URL? { queue.sync { downloads.fileURL(named: name) } }
+    func deleteFile(named name: String) -> Bool { queue.sync { downloads.deleteFile(named: name) } }
 
     private func newTab() {
-        guard let url = Navigation.destinationURL(for: homepage) else { return }
+        guard tabs.count < maxTabs,
+              let url = Navigation.destinationURL(for: homepage) else { return }
         cdp.send("Target.createTarget", ["url": url.absoluteString])
     }
 
     private func adoptTarget(_ targetId: String, activate: Bool, navigateTo: String?) {
         guard !tabs.contains(where: { $0.targetId == targetId }) else { return }
+        guard tabs.count < maxTabs else {
+            cdp.send("Target.closeTarget", ["targetId": targetId])
+            return
+        }
         let tab = HeadlessTab(targetId: targetId)
         tabs.append(tab)
         if activate || activeTabID == nil {
@@ -243,7 +276,7 @@ final class BrowserSession {
     }
 
     private func startScreencast(_ tab: HeadlessTab) {
-        guard let sessionId = tab.sessionId else { return }
+        guard !paused, let sessionId = tab.sessionId else { return }
         cdp.send("Page.startScreencast", [
             "format": streamer.screencastFormat,
             "quality": streamer.screencastQuality,
@@ -347,8 +380,8 @@ final class BrowserSession {
                 return
             }
             URLFilter.evaluateURL(url) { [weak self] verdict in
-                DispatchQueue.main.async {
-                    guard let self else { return }
+                guard let self else { return }
+                self.queue.async {
                     let isMainFrame = tab != nil && frameId != nil && frameId == tab?.mainFrameId
                     switch verdict {
                     case .allowed:
@@ -453,6 +486,10 @@ final class BrowserSession {
     }
 
     func handleControlMessage(_ message: [String: Any]) {
+        queue.async { self.processControlMessage(message) }
+    }
+
+    private func processControlMessage(_ message: [String: Any]) {
         switch message["type"] as? String {
         case "frameack":
             if let seq = doubleValue(message["seq"]) {
@@ -521,9 +558,9 @@ final class BrowserSession {
         case "navigate":
             if let raw = message["url"] as? String, let tabID = activeTabID {
                 URLFilter.evaluate(raw) { [weak self] verdict in
-                    DispatchQueue.main.async {
-                        guard let self,
-                              let tab = self.tabs.first(where: { $0.targetId == tabID }) else { return }
+                    guard let self else { return }
+                    self.queue.async {
+                        guard let tab = self.tabs.first(where: { $0.targetId == tabID }) else { return }
                         switch verdict {
                         case .allowed(let url):
                             tab.navError = nil

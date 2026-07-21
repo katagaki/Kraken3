@@ -37,6 +37,10 @@ func runHeadless() {
     let maxSessions = environment["KRAKEN_MAX_SESSIONS"].flatMap { Int($0) } ?? 10
     let ipACLEnabled = !flag("KRAKEN_DISABLE_IP_ACL")
     let sessionTimeout = environment["KRAKEN_SESSION_TIMEOUT"].flatMap { TimeInterval($0) } ?? 300
+    let maxTabs = environment["KRAKEN_MAX_TABS"].flatMap { Int($0) } ?? 8
+    let minFreeMemoryMB = environment["KRAKEN_MIN_FREE_MB"].flatMap { Int($0) } ?? 512
+    let rendererProcessLimit = environment["KRAKEN_RENDERER_LIMIT"].flatMap { Int($0) } ?? 4
+    let jsHeapMB = environment["KRAKEN_JS_HEAP_MB"].flatMap { Int($0) } ?? 256
 
     guard let chromiumPath = findChromium(override: environment["KRAKEN_CHROMIUM"]) else {
         fputs("Kraken: no Chromium binary found. Install chromium or set KRAKEN_CHROMIUM.\n", stderr)
@@ -53,7 +57,11 @@ func runHeadless() {
         singleUser: singleUser,
         maxSessions: maxSessions,
         ipACLEnabled: ipACLEnabled,
-        sessionTimeout: sessionTimeout
+        sessionTimeout: sessionTimeout,
+        maxTabsPerSession: maxTabs,
+        minFreeMemoryMB: minFreeMemoryMB,
+        rendererProcessLimit: rendererProcessLimit,
+        jsHeapMB: jsHeapMB
     )
 
     do {
@@ -67,6 +75,7 @@ func runHeadless() {
 
     print("Kraken is running (headless).")
     print("Mode: \(singleUser ? "single-user" : "multi-user (max \(maxSessions) sessions)")")
+    print("Limits: \(maxTabs) tabs/session, \(rendererProcessLimit) renderers/session, \(jsHeapMB)MB JS heap, \(minFreeMemoryMB)MB memory floor")
     print("Sessions folder: \(sessionsRoot.path)")
     print("Chromium: \(chromiumPath)")
     print("Homepage: \(homepage)")

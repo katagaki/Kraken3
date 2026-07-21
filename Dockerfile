@@ -1,5 +1,5 @@
 FROM swift:6.3.3-bookworm AS build
-RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev libjpeg62-turbo-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY Package.swift ./
@@ -8,7 +8,7 @@ RUN swift build -c release --static-swift-stdlib
 
 FROM debian:bookworm-20260713-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        chromium ca-certificates \
+        chromium ca-certificates libjpeg62-turbo \
         fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/.build/release/Kraken /usr/local/bin/kraken

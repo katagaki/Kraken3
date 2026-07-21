@@ -13,6 +13,7 @@ final class CDPConnection {
     private let commandFD: Int32
     private let responseFD: Int32
     private let pid: pid_t
+    private let queue: DispatchQueue
 
     var processID: pid_t { pid }
 
@@ -24,7 +25,8 @@ final class CDPConnection {
     private var completions: [Int: ([String: Any]) -> Void] = [:]
     private let lock = NSLock()
 
-    init(chromiumPath: String, arguments: [String]) throws {
+    init(chromiumPath: String, arguments: [String], queue: DispatchQueue) throws {
+        self.queue = queue
         var commandPipe: [Int32] = [0, 0]
         var responsePipe: [Int32] = [0, 0]
         guard pipe(&commandPipe) == 0, pipe(&responsePipe) == 0 else {
@@ -115,23 +117,24 @@ final class CDPConnection {
             lock.unlock()
             if let completion {
                 let result = object["result"] as? [String: Any] ?? object
-                DispatchQueue.main.async { completion(result) }
+                queue.async { completion(result) }
             }
         } else if let method = object["method"] as? String {
             let params = object["params"] as? [String: Any] ?? [:]
             let sessionId = object["sessionId"] as? String
-            DispatchQueue.main.async { self.onEvent?(method, params, sessionId) }
+            queue.async { self.onEvent?(method, params, sessionId) }
         }
     }
 
     private func startWaiter() {
         let childPID = pid
+        let queue = queue
         Thread.detachNewThread { [weak self] in
             var status: Int32 = 0
             waitpid(childPID, &status, 0)
             let exitStatus = status
             let connection = self
-            DispatchQueue.main.async { connection?.onExit?(exitStatus) }
+            queue.async { connection?.onExit?(exitStatus) }
         }
     }
 }

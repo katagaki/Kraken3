@@ -14,6 +14,10 @@ struct KrakenConfig {
     let maxSessions: Int
     let ipACLEnabled: Bool
     let sessionTimeout: TimeInterval
+    let maxTabsPerSession: Int
+    let minFreeMemoryMB: Int
+    let rendererProcessLimit: Int
+    let jsHeapMB: Int
 }
 
 final class SessionRecord {
@@ -44,9 +48,9 @@ final class SessionManager {
     private let config: KrakenConfig
 
     private let lock = NSLock()
-    private let createQueue = DispatchQueue(label: "kraken.sessions.create")
 
     private var sessions: [String: SessionRecord] = [:]
+    private var pendingCreations = 0
     private var claimedSessionID: String?
 
     private var accessTokens: [String: (sid: String, expires: Date)] = [:]
@@ -128,51 +132,65 @@ final class SessionManager {
     }
 
     func obtainForNewClient(acceptLanguage: String?) -> ObtainResult {
-        createQueue.sync {
-            lock.lock()
-            if config.singleUser, let claimed = claimedSessionID, sessions[claimed] != nil {
-                lock.unlock()
-                return .deniedSingleUser
-            }
-            if !config.singleUser, sessions.count >= config.maxSessions {
-                lock.unlock()
-                return .deniedCapacity
-            }
+        lock.lock()
+        if config.singleUser,
+           (claimedSessionID.map { sessions[$0] != nil } ?? false) || pendingCreations > 0 {
             lock.unlock()
-
-            let id = Self.randomID()
-            let dir = config.sessionsRoot.appendingPathComponent(id)
-            let profileDir = dir.appendingPathComponent("profile")
-            let downloadsDir = dir.appendingPathComponent("downloads")
-            let fm = FileManager.default
-            try? fm.createDirectory(at: profileDir, withIntermediateDirectories: true)
-            try? fm.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
-
-            let made = makeBrowser(profileDir: profileDir, downloadsDir: downloadsDir,
-                                   acceptLanguage: acceptLanguage)
-            guard case .success(let browser) = made else {
-                try? fm.removeItem(at: dir)
-                if case .failure(let error) = made { return .failed("\(error)") }
-                return .failed("unknown error")
-            }
-
-            let now = Date()
-            let record = SessionRecord(id: id, browser: browser, dir: dir,
-                                       pid: browser.processID,
-                                       acceptLanguage: acceptLanguage, now: now)
-            wire(record)
-
-            lock.lock()
-            sessions[id] = record
-            if config.singleUser { claimedSessionID = id }
-            let access = issueAccess(sid: id, now: now)
-            let refresh = issueRefresh(sid: id, now: now)
-            lock.unlock()
-
-            writeMeta(record, now: now)
-            writeTokens(record, access: access, refresh: refresh, now: now)
-            return .created(Auth(record: record, access: access, refresh: refresh))
+            return .deniedSingleUser
         }
+        if !config.singleUser, sessions.count + pendingCreations >= config.maxSessions {
+            lock.unlock()
+            return .deniedCapacity
+        }
+        pendingCreations += 1
+        lock.unlock()
+
+        func abandon() {
+            lock.lock()
+            pendingCreations -= 1
+            lock.unlock()
+        }
+
+        if let availableMB = SystemMemory.availableMB(), availableMB < config.minFreeMemoryMB {
+            abandon()
+            fputs("Kraken: refusing new session, only \(availableMB)MB memory available\n", stderr)
+            return .deniedCapacity
+        }
+
+        let id = Self.randomID()
+        let dir = config.sessionsRoot.appendingPathComponent(id)
+        let profileDir = dir.appendingPathComponent("profile")
+        let downloadsDir = dir.appendingPathComponent("downloads")
+        let fm = FileManager.default
+        try? fm.createDirectory(at: profileDir, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: downloadsDir, withIntermediateDirectories: true)
+
+        let made = makeBrowser(profileDir: profileDir, downloadsDir: downloadsDir,
+                               acceptLanguage: acceptLanguage)
+        guard case .success(let browser) = made else {
+            abandon()
+            try? fm.removeItem(at: dir)
+            if case .failure(let error) = made { return .failed("\(error)") }
+            return .failed("unknown error")
+        }
+
+        let now = Date()
+        let record = SessionRecord(id: id, browser: browser, dir: dir,
+                                   pid: browser.processID,
+                                   acceptLanguage: acceptLanguage, now: now)
+        wire(record)
+
+        lock.lock()
+        pendingCreations -= 1
+        sessions[id] = record
+        if config.singleUser { claimedSessionID = id }
+        let access = issueAccess(sid: id, now: now)
+        let refresh = issueRefresh(sid: id, now: now)
+        lock.unlock()
+
+        writeMeta(record, now: now)
+        writeTokens(record, access: access, refresh: refresh, now: now)
+        return .created(Auth(record: record, access: access, refresh: refresh))
     }
 
     func restoreSessions() {
@@ -269,21 +287,20 @@ final class SessionManager {
                              acceptLanguage: String?,
                              restoreTabs: [String] = [],
                              restoreActiveIndex: Int = 0) -> Result<BrowserSession, Error> {
-        func build() -> Result<BrowserSession, Error> {
-            Result {
-                try BrowserSession(chromiumPath: config.chromiumPath,
-                                   homepage: config.homepage,
-                                   profileDir: profileDir,
-                                   downloadsDir: downloadsDir,
-                                   acceptLanguage: acceptLanguage,
-                                   restoreTabs: restoreTabs,
-                                   restoreActiveIndex: restoreActiveIndex)
-            }
+        Result {
+            try BrowserSession(chromiumPath: config.chromiumPath,
+                               homepage: config.homepage,
+                               profileDir: profileDir,
+                               downloadsDir: downloadsDir,
+                               acceptLanguage: acceptLanguage,
+                               extraArguments: [
+                                   "--renderer-process-limit=\(config.rendererProcessLimit)",
+                                   "--js-flags=--max-old-space-size=\(config.jsHeapMB)"
+                               ],
+                               maxTabs: config.maxTabsPerSession,
+                               restoreTabs: restoreTabs,
+                               restoreActiveIndex: restoreActiveIndex)
         }
-        if Thread.isMainThread { return build() }
-        var result: Result<BrowserSession, Error>!
-        DispatchQueue.main.sync { result = build() }
-        return result
     }
 
     private func wire(_ record: SessionRecord) {
@@ -322,7 +339,7 @@ final class SessionManager {
         lock.unlock()
 
         closeClients(sid)
-        DispatchQueue.main.async { record.browser.shutdown() }
+        record.browser.shutdown()
         try? FileManager.default.removeItem(at: record.dir)
     }
 

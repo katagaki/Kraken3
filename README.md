@@ -4,8 +4,6 @@ A remote-controlled browser that can be accessed from mobile devices via the loc
 
 ## Running
 
-The container drives headless Chromium over the DevTools protocol and serves a phone control page.
-
 ```sh
 docker compose up -d --build
 ```
@@ -19,6 +17,12 @@ docker compose up -d --build
   later client is refused. Default `0` (multi-user).
 - `KRAKEN_MAX_SESSIONS`: max concurrent sessions in multi-user mode (default `10`).
 - `KRAKEN_SESSION_TIMEOUT`: idle seconds before a session is reaped (default `300`).
+- `KRAKEN_MAX_TABS`: max tabs per session; extra tabs and popups are refused
+  (default `8`).
+- `KRAKEN_MIN_FREE_MB`: refuse new sessions when available system memory is below
+  this many MB (default `512`; Linux only).
+- `KRAKEN_RENDERER_LIMIT`: Chromium renderer process cap per session (default `4`).
+- `KRAKEN_JS_HEAP_MB`: V8 heap cap per renderer in MB (default `256`).
 - `KRAKEN_DISABLE_IP_ACL`: `1` disables the client IP allowlist (only if Kraken sits
   behind a trusted reverse proxy that already restricts access).
 
@@ -57,11 +61,3 @@ view over a WebSocket on the same origin (`/ws`).
 - **Downloads**: progress bars; save a finished file to the phone or delete it.
 - **Add to Home Screen**: the control page is an installable PWA with its own
   icon and standalone chrome.
-
-## Streaming
-
-The live view sends only the changed region of each frame as a lossless PNG tile
-composited onto a canvas. Sustained large changes (video, scrolling) switch to
-JPEG streaming, and calm pages switch back. The client acknowledges every frame,
-so a slow link conflates to the newest frame instead of building a backlog, and
-JPEG quality steps down under pressure and recovers when the link is healthy.

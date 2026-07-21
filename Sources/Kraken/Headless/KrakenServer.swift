@@ -38,6 +38,10 @@ final class KrakenServer {
         ws.onClientConnected = { [weak self] sid in
             self?.sessions.browser(sid)?.syncNewClient()
         }
+        ws.onClientDisconnected = { [weak self] sid in
+            guard let self, !self.ws.sessionsWithClients().contains(sid) else { return }
+            self.sessions.browser(sid)?.clientsGone()
+        }
 
         sessions.restoreSessions()
         try http.start(port: config.httpPort)
@@ -91,21 +95,21 @@ final class KrakenServer {
 
         case ("GET", "/files"):
             guard let auth = sessions.authenticate(request.cookies) else { return unauthorized() }
-            let entries = DispatchQueue.main.sync { auth.record.browser.entries() }
+            let entries = auth.record.browser.entries()
             let body = (try? JSONEncoder().encode(entries)) ?? Data("[]".utf8)
             return authed(status: "200 OK", body: body, contentType: "application/json", auth: auth)
 
         case ("GET", let path) where path.hasPrefix("/files/"):
             guard let auth = sessions.authenticate(request.cookies) else { return unauthorized() }
             let name = String(path.dropFirst("/files/".count))
-            let url = DispatchQueue.main.sync { auth.record.browser.fileURL(named: name) }
-            guard let url, let body = try? Data(contentsOf: url) else {
+            guard let url = auth.record.browser.fileURL(named: name) else {
                 return authed(status: "404 Not Found", body: Data("not found".utf8),
                               contentType: "text/plain", auth: auth)
             }
             let safeName = Filenames.stripControl(name).replacingOccurrences(of: "\"", with: "_")
-            var response = authed(status: "200 OK", body: body,
+            var response = authed(status: "200 OK", body: Data(),
                                   contentType: "application/octet-stream", auth: auth)
+            response.bodyFile = url
             response.extraHeaders["Content-Disposition"] = "attachment; filename=\"\(safeName)\""
             return response
 
@@ -115,7 +119,7 @@ final class KrakenServer {
             }
             guard let auth = sessions.authenticate(request.cookies) else { return unauthorized() }
             let name = String(path.dropFirst("/files/".count))
-            let ok = DispatchQueue.main.sync { auth.record.browser.deleteFile(named: name) }
+            let ok = auth.record.browser.deleteFile(named: name)
             return authed(status: ok ? "200 OK" : "404 Not Found",
                           body: Data((ok ? "deleted" : "not found").utf8),
                           contentType: "text/plain", auth: auth)

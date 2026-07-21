@@ -11,14 +11,17 @@ final class HeadlessDownloads {
     }
 
     private let directory: URL
+    private let queue: DispatchQueue
 
     private var active: [Item] = []
     private var lastBroadcast = Date.distantPast
 
     var onChange: (() -> Void)?
 
-    init(directory: URL) {
+    // All calls must happen on `queue` (the owning session's serial queue).
+    init(directory: URL, queue: DispatchQueue) {
         self.directory = directory
+        self.queue = queue
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
@@ -41,7 +44,7 @@ final class HeadlessDownloads {
         case "canceled":
             active[index].failed = true
             notifyChange()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            queue.asyncAfter(deadline: .now() + 5) { [weak self] in
                 self?.active.removeAll { $0.guid == guid }
                 self?.notifyChange()
             }

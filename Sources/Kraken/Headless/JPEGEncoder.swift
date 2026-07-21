@@ -1,5 +1,30 @@
 import Foundation
 
+#if canImport(CJPEG)
+import CJPEG
+
+// libjpeg-turbo via the CJPEG shim; an order of magnitude faster than the
+// pure-Swift encoder below, which remains for platforms without libjpeg.
+enum JPEGEncoder {
+
+    static func encode(width: Int, height: Int, rgba: [UInt8], quality: Int) -> Data? {
+        guard width > 0, height > 0, rgba.count >= width * height * 4 else { return nil }
+        var size = 0
+        let buffer = rgba.withUnsafeBufferPointer {
+            kraken_jpeg_encode($0.baseAddress, Int32(width), Int32(height),
+                               Int32(max(1, min(quality, 100))), &size)
+        }
+        guard let buffer, size > 0 else {
+            if let buffer { kraken_jpeg_free(buffer) }
+            return nil
+        }
+        return Data(bytesNoCopy: buffer, count: size,
+                    deallocator: .custom { pointer, _ in
+                        kraken_jpeg_free(pointer.assumingMemoryBound(to: UInt8.self))
+                    })
+    }
+}
+#else
 // Baseline sequential JPEG (4:4:4, standard Annex K tables). Exists so full
 // frames can be produced from screencast pixels without Page.captureScreenshot,
 // which perturbs the compositor and causes visible relayout flashes.
@@ -286,3 +311,4 @@ enum JPEGEncoder {
         return table
     }()
 }
+#endif

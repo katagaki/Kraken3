@@ -10,7 +10,8 @@ final class HeadlessWebSocketServer {
     private final class Client {
         let fd: Int32
         let sessionID: String
-        let writeLock = NSLock()
+        // Per-client so one stalled link cannot block writes to anyone else.
+        let sendQueue = DispatchQueue(label: "kraken.ws.client")
         init(fd: Int32, sessionID: String) {
             self.fd = fd
             self.sessionID = sessionID
@@ -19,10 +20,10 @@ final class HeadlessWebSocketServer {
 
     var onMessage: ((String, [String: Any]) -> Void)?
     var onClientConnected: ((String) -> Void)?
+    var onClientDisconnected: ((String) -> Void)?
 
     private var clients: [Client] = []
     private let clientsLock = NSLock()
-    private let sendQueue = DispatchQueue(label: "kraken.ws.send")
 
     func accept(fd: Int32, key: String, sessionID: String) {
         let magic = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -46,6 +47,10 @@ final class HeadlessWebSocketServer {
         clientsLock.lock()
         clients.removeAll { $0 === client }
         clientsLock.unlock()
+        // Drain pending writes before the caller closes the fd, so a queued
+        // send can never hit a recycled descriptor.
+        client.sendQueue.sync {}
+        onClientDisconnected?(sessionID)
     }
 
     func sendFrame(toSession sessionID: String, _ data: Data) {
@@ -135,8 +140,7 @@ final class HeadlessWebSocketServer {
             if fin {
                 if messageOpcode == 0x1,
                    let json = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any] {
-                    let sessionID = client.sessionID
-                    DispatchQueue.main.async { self.onMessage?(sessionID, json) }
+                    onMessage?(client.sessionID, json)
                 }
                 messageData = Data()
             }
@@ -164,23 +168,20 @@ final class HeadlessWebSocketServer {
 
     private func send(_ client: Client, opcode: UInt8, payload: Data) {
         let data = frame(opcode: opcode, payload: payload)
-        client.writeLock.lock()
-        _ = SocketIO.writeAll(client.fd, data)
-        client.writeLock.unlock()
+        client.sendQueue.sync {
+            _ = SocketIO.writeAll(client.fd, data)
+        }
     }
 
     private func broadcast(toSession sessionID: String, opcode: UInt8, payload: Data) {
-        sendQueue.async { [weak self] in
-            guard let self else { return }
-            self.clientsLock.lock()
-            let snapshot = self.clients.filter { $0.sessionID == sessionID }
-            self.clientsLock.unlock()
-            let data = self.frame(opcode: opcode, payload: payload)
-            for client in snapshot {
-                client.writeLock.lock()
-                let ok = SocketIO.writeAll(client.fd, data)
-                client.writeLock.unlock()
-                if !ok {
+        clientsLock.lock()
+        let snapshot = clients.filter { $0.sessionID == sessionID }
+        clientsLock.unlock()
+        guard !snapshot.isEmpty else { return }
+        let data = frame(opcode: opcode, payload: payload)
+        for client in snapshot {
+            client.sendQueue.async {
+                if !SocketIO.writeAll(client.fd, data) {
                     shutdown(client.fd, 2)
                 }
             }
