@@ -501,10 +501,11 @@ final class BrowserSession {
             }
         case "scroll":
             if let dx = doubleValue(message["dx"]), let dy = doubleValue(message["dy"]) {
-                callHelper("scroll", [dx * viewportWidth,
-                                      dy * viewportHeight,
-                                      doubleValue(message["x"]) ?? -1,
-                                      doubleValue(message["y"]) ?? -1])
+                let nx = doubleValue(message["x"]) ?? -1
+                let ny = doubleValue(message["y"]) ?? -1
+                injectScroll(deltaX: dx * viewportWidth, deltaY: dy * viewportHeight,
+                             normalizedX: nx >= 0 ? nx : 0.5,
+                             normalizedY: ny >= 0 ? ny : 0.5)
             }
         case "dragstart":
             if let x = doubleValue(message["x"]), let y = doubleValue(message["y"]) {
@@ -678,8 +679,40 @@ final class BrowserSession {
     }
 
     private func injectTap(normalizedX: Double, normalizedY: Double) {
-        sendMouse("mousePressed", normalizedX: normalizedX, normalizedY: normalizedY, buttons: 1, clickCount: 1)
-        sendMouse("mouseReleased", normalizedX: normalizedX, normalizedY: normalizedY, buttons: 0, clickCount: 1)
+        // Mobile layouts can ignore synthetic mouse clicks; real touch events go
+        // through Chromium's gesture pipeline, which synthesizes the tap -> click
+        // sequence the page expects. Desktop layouts keep mouse semantics (hover).
+        if isMobileViewport, let sessionId = activeTab?.sessionId {
+            let point: [String: Any] = [
+                "x": min(max(normalizedX, 0), 1) * viewportWidth,
+                "y": min(max(normalizedY, 0), 1) * viewportHeight
+            ]
+            cdp.send("Input.dispatchTouchEvent",
+                     ["type": "touchStart", "touchPoints": [point]], sessionId: sessionId)
+            cdp.send("Input.dispatchTouchEvent",
+                     ["type": "touchEnd", "touchPoints": [] as [[String: Any]]], sessionId: sessionId)
+        } else {
+            sendMouse("mousePressed", normalizedX: normalizedX, normalizedY: normalizedY, buttons: 1, clickCount: 1)
+            sendMouse("mouseReleased", normalizedX: normalizedX, normalizedY: normalizedY, buttons: 0, clickCount: 1)
+        }
+    }
+
+    // Native wheel events scroll on the compositor thread and hit-test into
+    // nested scrollers and iframes; scripted scrollTop stalls on busy main
+    // threads and animates under CSS scroll-behavior: smooth. CDP negates the
+    // deltas internally, so positive deltaY here scrolls down (DOM convention).
+    private func injectScroll(deltaX: Double, deltaY: Double,
+                              normalizedX: Double, normalizedY: Double) {
+        guard let sessionId = activeTab?.sessionId else { return }
+        cdp.send("Input.dispatchMouseEvent", [
+            "type": "mouseWheel",
+            "x": min(max(normalizedX, 0), 1) * viewportWidth,
+            "y": min(max(normalizedY, 0), 1) * viewportHeight,
+            "button": "none",
+            "buttons": 0,
+            "deltaX": deltaX,
+            "deltaY": deltaY
+        ], sessionId: sessionId)
     }
 
     private func sendMouse(_ type: String, normalizedX: Double, normalizedY: Double,

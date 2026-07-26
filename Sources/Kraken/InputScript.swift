@@ -205,35 +205,6 @@ enum InputScript {
           drag = null;
         },
 
-        scroll: function (dx, dy, nx, ny) {
-          function canConsume(node) {
-            if (dy < 0 && node.scrollTop > 0) return true;
-            if (dy > 0 && node.scrollTop < node.scrollHeight - node.clientHeight - 1) return true;
-            if (dx < 0 && node.scrollLeft > 0) return true;
-            if (dx > 0 && node.scrollLeft < node.scrollWidth - node.clientWidth - 1) return true;
-            return false;
-          }
-          var target = null;
-          if (typeof nx === 'number' && nx >= 0) {
-            var node = document.elementFromPoint(nx * window.innerWidth, ny * window.innerHeight);
-            while (node && node !== document.body && node !== document.documentElement) {
-              var style = getComputedStyle(node);
-              var scrollableY = /(auto|scroll|overlay)/.test(style.overflowY) &&
-                                node.scrollHeight > node.clientHeight + 1;
-              var scrollableX = /(auto|scroll|overlay)/.test(style.overflowX) &&
-                                node.scrollWidth > node.clientWidth + 1;
-              if ((scrollableY || scrollableX) && canConsume(node)) { target = node; break; }
-              node = node.parentElement;
-            }
-          }
-          if (target) {
-            target.scrollLeft += dx;
-            target.scrollTop += dy;
-          } else {
-            window.scrollBy(dx, dy);
-          }
-        },
-
         textAt: function (nx, ny) {
           var sel = window.getSelection ? String(window.getSelection()) : '';
           if (sel && sel.trim()) return sel.slice(0, 20000);
